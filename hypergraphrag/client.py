@@ -19,6 +19,7 @@ logger = setup_logger("hypergraphrag.client")
 DEFAULT_CHUNK_LIMIT = 100
 DEFAULT_ENTITY_SEARCH_MULTIPLIER = 3
 DEFAULT_MAX_CONCURRENT_TASKS = 10
+NEO4J_QUERY_CONCURRENCY = 20
 PATH_SCORE_SIMILARITY_WEIGHT = 0.7
 PATH_SCORE_PARENT_WEIGHT = 0.3
 
@@ -72,6 +73,9 @@ class HyperGraphRAG:
         # Configuration
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        
+        # Semaphore for query concurrency
+        self.query_semaphore = asyncio.Semaphore(NEO4J_QUERY_CONCURRENCY)
     
     async def insert_data(
         self,
@@ -116,9 +120,6 @@ class HyperGraphRAG:
         
         # Step 2: Extract entities and hyperedges AND Store in parallel batches (async pipeline)
         logger.debug("Starting extraction and storage pipeline...")
-        
-        # Create semaphore to limit concurrent tasks
-        semaphore = asyncio.Semaphore(max_concurrent_tasks)
         
         # Create semaphore to limit concurrent DB writes to prevent deadlocks
         db_semaphore = asyncio.Semaphore(1)
@@ -511,12 +512,13 @@ class HyperGraphRAG:
         
         # Process entities concurrently
         async def get_hyperedges_for_entity(entity_name: str):
-            hyperedges = await asyncio.to_thread(
-                self.neo4j.get_hyperedges_by_entity,
-                entity_name,
-                limit=limit_per_entity
-            )
-            return entity_name, hyperedges
+            async with self.query_semaphore:
+                hyperedges = await asyncio.to_thread(
+                    self.neo4j.get_hyperedges_by_entity,
+                    entity_name,
+                    limit=limit_per_entity
+                )
+                return entity_name, hyperedges
         
         # Get hyperedges for all entities concurrently
         tasks = [get_hyperedges_for_entity(name) for name in entity_names]
@@ -550,31 +552,40 @@ class HyperGraphRAG:
         
         # Get entities for selected hyperedges concurrently
         async def get_entities_for_hyperedge(hyperedge_id: str):
-            return await asyncio.to_thread(
-                self.neo4j.get_entities_by_hyperedge,
-                hyperedge_id
-            )
+            async with self.query_semaphore:
+                entities = await asyncio.to_thread(
+                    self.neo4j.get_entities_by_hyperedge,
+                    hyperedge_id
+                )
+                return hyperedge_id, entities
         
         # Process hyperedges and get their entities
+        tasks = []
         for hyperedge_id, (hyperedge, source_score) in final_hyperedge_data.items():
             if hyperedge_id in visited_hyperedges:
                 continue
             
             visited_hyperedges.add(hyperedge_id)
+            tasks.append(get_entities_for_hyperedge(hyperedge_id))
             
-            # Get all entities in this hyperedge (async)
-            entities_in_hyperedge = await get_entities_for_hyperedge(hyperedge_id)
-            entity_names_in_hyperedge = [e["name"] for e in entities_in_hyperedge]
+        if tasks:
+            results = await asyncio.gather(*tasks)
             
-            # Store hyperedge info with source score
-            hyperedge_info = {
-                "hyperedge_id": hyperedge_id,
-                "entities": entity_names_in_hyperedge,
-                "content": hyperedge.get("content", ""),
-                "source_score": source_score  # Added for Path Scoring
-            }
-            hop_hyperedges[hyperedge_id] = hyperedge_info
-            all_hyperedges[hyperedge_id] = hyperedge_info
+            for hyperedge_id, entities_in_hyperedge in results:
+                # Retrieve original data
+                hyperedge, source_score = final_hyperedge_data[hyperedge_id]
+                
+                entity_names_in_hyperedge = [e["name"] for e in entities_in_hyperedge]
+                
+                # Store hyperedge info with source score
+                hyperedge_info = {
+                    "hyperedge_id": hyperedge_id,
+                    "entities": entity_names_in_hyperedge,
+                    "content": hyperedge.get("content", ""),
+                    "source_score": source_score  # Added for Path Scoring
+                }
+                hop_hyperedges[hyperedge_id] = hyperedge_info
+                all_hyperedges[hyperedge_id] = hyperedge_info
         
         return hop_hyperedges
     
@@ -766,11 +777,12 @@ class HyperGraphRAG:
         all_chunk_ids = set()
         
         async def get_chunks_for_entity(entity_name: str):
-            chunk_ids = await asyncio.to_thread(
-                self.neo4j.get_chunks_by_entity,
-                entity_name
-            )
-            return chunk_ids
+            async with self.query_semaphore:
+                chunk_ids = await asyncio.to_thread(
+                    self.neo4j.get_chunks_by_entity,
+                    entity_name
+                )
+                return chunk_ids
         
         tasks = [get_chunks_for_entity(name) for name in entity_names]
         results = await asyncio.gather(*tasks)
