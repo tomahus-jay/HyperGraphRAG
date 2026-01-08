@@ -64,7 +64,7 @@ async def main():
         
         # Bulk Insert
         # Lower concurrency to avoid overloading the LLM server/API
-        # await rag.insert_data(
+        # await rag.add(
         #     documents=all_documents, 
         #     metadata=all_metadatas,
         #     batch_size=5,

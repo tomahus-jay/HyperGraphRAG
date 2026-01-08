@@ -78,7 +78,7 @@ async def main():
 
     # Insert data
     # batch_size and max_concurrent_tasks control processing speed vs. load
-    await rag.insert_data(
+    await rag.add(
         documents=["Document 1", "Document 2", ...],
         batch_size=5,             
         max_concurrent_tasks=5    
@@ -126,7 +126,7 @@ Query 1: What other titles did the magazine Science Fantasy appear under?
 
 ## Performance Tuning
 
-For larger datasets, you can adjust the following parameters in `insert_data`:
+For larger datasets, you can adjust the following parameters in `add`:
 
 - **`batch_size`**: Number of chunks processed in a single LLM batch (Recommended: 5-20).
 - **`max_concurrent_tasks`**: Number of batches processed in parallel (Recommended: 3-10).

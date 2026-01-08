@@ -1,4 +1,4 @@
-"""Example: Insert documents into Hypergraph RAG"""
+"""Example: Add documents into Hypergraph RAG"""
 import asyncio
 from hypergraphrag import HyperGraphRAG
 
@@ -9,7 +9,7 @@ async def main():
         chunk_overlap=50
     )
     
-    # Example documents to insert
+    # Example documents to add
     documents = [
         """
         Artificial Intelligence (AI) is a technology designed to enable computer systems 
@@ -41,9 +41,9 @@ async def main():
         """
     ]
     
-    # Insert data with metadata
-    print("📝 Inserting documents into Hypergraph RAG...")
-    await rag.insert_data(
+    # Add data with metadata
+    print("📝 Adding documents into Hypergraph RAG...")
+    await rag.add(
         documents=documents,
         metadata=[
             {"source": "ai_intro", "category": "basic", "topic": "AI"},
@@ -56,7 +56,7 @@ async def main():
         max_concurrent_tasks=5
     )
     
-    print("✅ Documents inserted successfully!")
+    print("✅ Documents added successfully!")
     print("   - Documents are chunked and stored")
     print("   - Entities and hyperedges are extracted")
     print("   - Embeddings are generated and stored in Neo4j")

@@ -126,7 +126,7 @@ class HyperGraphRAG:
             "details": status
         }
 
-    async def insert_data_stream(
+    async def add_stream(
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
@@ -258,7 +258,7 @@ class HyperGraphRAG:
             }
         }
 
-    async def insert_data(
+    async def add(
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
@@ -270,7 +270,7 @@ class HyperGraphRAG:
         Insert document data and create hypergraph structure with async batch processing.
         Displays a progress bar if tqdm is available and show_progress is True.
         """
-        stream = self.insert_data_stream(
+        stream = self.add_stream(
             documents, 
             metadata, 
             batch_size, 

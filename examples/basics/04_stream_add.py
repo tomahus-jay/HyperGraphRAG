@@ -1,4 +1,4 @@
-"""Example: Stream Insert documents into Hypergraph RAG with Text Logging"""
+"""Example: Stream Add documents into Hypergraph RAG with Text Logging"""
 import asyncio
 from hypergraphrag import HyperGraphRAG
 
@@ -9,7 +9,7 @@ async def main():
         chunk_overlap=50
     )
     
-    # Example documents to insert (Same as basic_insert.py)
+    # Example documents to add (Same as basic_add.py)
     documents = [
         """
         Artificial Intelligence (AI) is a technology designed to enable computer systems 
@@ -50,11 +50,11 @@ async def main():
         {"source": "graph_db", "category": "intermediate", "topic": "Database"}
     ]
     
-    print("🚀 Starting Stream Insert...")
+    print("🚀 Starting Stream Add...")
     
-    # Insert data using stream method with manual logging
+    # Add data using stream method with manual logging
     # Using batch_size=1 to see granular updates for this small dataset
-    async for update in rag.insert_data_stream(
+    async for update in rag.add_stream(
         documents=documents,
         metadata=metadata,
         batch_size=1,
@@ -78,7 +78,7 @@ async def main():
             )
             
         elif status == "complete":
-            print("\n✅ Insert Completed Successfully!")
+            print("\n✅ Add Completed Successfully!")
             print("📊 Final Statistics:")
             final_stats = update["total_stats"]
             print(f"   - Total Chunks:     {final_stats['chunks']}")

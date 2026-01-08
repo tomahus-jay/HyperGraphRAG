@@ -1,65 +1,31 @@
-# Examples
+# Hypergraph RAG Examples
 
-This directory contains example scripts demonstrating how to use Hypergraph RAG.
+This directory contains example scripts demonstrating how to use Hypergraph RAG, organized by complexity and use case.
 
-## Basic Usage
+## 📂 1. Basics (`examples/basics/`)
+Getting started with core functionalities.
 
-`basic_usage.py` - A simple example showing how to:
-- Initialize the Hypergraph RAG client
-- Insert documents
-- Query the knowledge base
-- Display results
+- **`01_add_documents.py`**: Adds documents to the Hypergraph RAG system.
+  - *Usage:* `python examples/basics/01_add_documents.py`
+- **`02_query_documents.py`**: Performs search queries on the indexed data.
+  - *Usage:* `python examples/basics/02_query_documents.py`
+- **`03_e2e_demo.py`**: A complete end-to-end example (Add + Query).
+  - *Usage:* `python examples/basics/03_e2e_demo.py`
 
-Run with:
-```bash
-python examples/basic_usage.py
-```
+## 🚀 2. Advanced (`examples/advanced/`)
+Advanced features like streaming and evaluation.
 
-## Insert Only
+- **`stream_add.py`**: Adds documents using a streaming interface for real-time progress updates.
+  - *Usage:* `python examples/advanced/stream_add.py`
+- **`ragas_evaluation.py`**: Evaluates the RAG system using the Ragas framework with HotpotQA dataset.
+  - *Usage:* `python examples/advanced/ragas_evaluation.py`
 
-`insert_only.py` - Example for inserting documents only:
-- Initialize the Hypergraph RAG client
-- Insert multiple documents with metadata
-- Configure batch processing options
-- Display insertion status
+## 🛠️ 3. Utils (`examples/utils/`)
+Utility scripts for maintenance and debugging.
 
-Run with:
-```bash
-python examples/insert_only.py
-```
-
-## Query Only
-
-`query_only.py` - Example for querying only (assumes data is already inserted):
-- Initialize the Hypergraph RAG client
-- Perform multiple queries
-- Display search results including chunks, hyperedges, and entities
-- Show similarity scores and relationships
-
-Run with:
-```bash
-python examples/query_only.py
-```
-
-## Self-Hosted LLM
-
-`self_hosted_llm.py` - Example for using self-hosted LLM services:
-- Configure LM Studio, vLLM, Ollama, or other OpenAI-compatible servers
-- Set up custom LLM endpoints using `base_url`
-
-## Self-Hosted Embeddings
-
-`self_hosted_embeddings.py` - Example for using self-hosted embedding services:
-- Configure custom embedding servers
-- Use HTTP-based embedding endpoints using `base_url`
+- **`check_health.py`**: Checks the connection status of Neo4j and vector indices.
+  - *Usage:* `python examples/utils/check_health.py`
 
 ## Prerequisites
 
-Make sure you have:
-- Neo4j running and configured
-- Qdrant running and configured
-- LLM API key or self-hosted LLM server configured
-- Embedding provider configured (if using API-based embeddings)
-
-See the main [README.md](../README.md) for detailed configuration instructions.
-
+Make sure you have your environment variables set up (see main [README.md](../README.md)) before running these examples.

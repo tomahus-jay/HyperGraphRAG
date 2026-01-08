@@ -45,7 +45,7 @@ async def main():
     
     # Insert data
     print("📝 Inserting documents...")
-    await rag.insert_data(
+    await rag.add(
         documents=documents,
         metadata=[
             {"source": "report_1", "category": "corporate_leak"},
