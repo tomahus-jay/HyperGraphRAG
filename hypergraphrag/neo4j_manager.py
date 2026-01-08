@@ -88,6 +88,38 @@ class Neo4jManager:
             except Exception:
                 pass
     
+    def check_connection(self) -> Dict[str, Any]:
+        """Check Neo4j connection and vector index dimensions"""
+        status = {
+            "connected": False,
+            "indexes": {},
+            "errors": []
+        }
+        
+        try:
+            with self.driver.session() as session:
+                # 1. Basic Connection Check
+                session.run("RETURN 1")
+                status["connected"] = True
+
+                # 2. Check Vector Index Dimensions
+                # Note: SHOW INDEXES output format can vary by Neo4j version
+                result = session.run("SHOW INDEXES YIELD name, type, options")
+                for record in result:
+                    if record["type"] == "VECTOR":
+                        name = record["name"]
+                        options = record["options"]
+                        if options and "indexConfig" in options:
+                            config = options["indexConfig"]
+                            # Retrieve dimensions safely
+                            dim = config.get("vector.dimensions")
+                            if dim is not None:
+                                status["indexes"][name] = int(dim)
+        except Exception as e:
+            status["errors"].append(str(e))
+            
+        return status
+
     def create_or_update_entity(
         self,
         entity_name: str,

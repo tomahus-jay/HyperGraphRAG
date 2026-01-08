@@ -1,9 +1,10 @@
 """Hypergraph RAG main client class"""
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Optional, Set, Tuple, AsyncIterator
 import hashlib
 import asyncio
 import time
 import json
+import math
 import numpy as np
 from numpy.linalg import norm
 from .neo4j_manager import Neo4jManager
@@ -15,11 +16,17 @@ from .logger import setup_logger
 
 logger = setup_logger("hypergraphrag.client")
 
+# Optional tqdm for progress bar
+try:
+    from tqdm.asyncio import tqdm
+except ImportError:
+    tqdm = None
+
 # Constants
 DEFAULT_CHUNK_LIMIT = 100
 DEFAULT_ENTITY_SEARCH_MULTIPLIER = 3
 DEFAULT_MAX_CONCURRENT_TASKS = 10
-NEO4J_QUERY_CONCURRENCY = 20
+NEO4J_QUERY_CONCURRENCY = 5
 PATH_SCORE_SIMILARITY_WEIGHT = 0.7
 PATH_SCORE_PARENT_WEIGHT = 0.3
 
@@ -77,15 +84,51 @@ class HyperGraphRAG:
         # Semaphore for query concurrency
         self.query_semaphore = asyncio.Semaphore(NEO4J_QUERY_CONCURRENCY)
     
-    async def insert_data(
+    def check_health(self) -> Dict[str, Any]:
+        """
+        Check database connection and configuration health.
+        Returns detailed status including connection state and dimension compatibility.
+        """
+        status = self.neo4j.check_connection()
+        
+        # Add logic to compare dimensions
+        current_dim = self.embedding.dimension
+        is_healthy = status["connected"]
+        messages = []
+        
+        if not status["connected"]:
+            messages.append("Failed to connect to Neo4j.")
+            if status["errors"]:
+                messages.append(f"Error: {status['errors'][0]}")
+            return {"healthy": False, "messages": messages, "details": status}
+
+        # Check dimensions
+        for idx_name, idx_dim in status["indexes"].items():
+            if idx_dim != current_dim:
+                is_healthy = False
+                messages.append(
+                    f"Dimension mismatch for index '{idx_name}': "
+                    f"DB has {idx_dim}, Client configured for {current_dim}."
+                )
+        
+        if not messages:
+            messages.append("Connection successful and configuration matches.")
+            
+        return {
+            "healthy": is_healthy,
+            "messages": messages,
+            "details": status
+        }
+
+    async def insert_data_stream(
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS
-    ) -> None:
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Insert document data and create hypergraph structure with async batch processing
+        Insert document data and yield progress updates using an iterator pattern.
         """
         if metadata is None:
             metadata = [{}] * len(documents)
@@ -117,6 +160,7 @@ class HyperGraphRAG:
             all_chunks.extend(chunks)
         
         logger.debug(f"Created {len(all_chunks)} chunks")
+        yield {"status": "chunking_complete", "total_chunks": len(all_chunks)}
         
         # Step 2: Extract entities and hyperedges AND Store in parallel batches (async pipeline)
         logger.debug("Starting extraction and storage pipeline...")
@@ -127,9 +171,8 @@ class HyperGraphRAG:
         async def process_chunk_batch_and_store(
             batch_idx: int,
             chunk_batch: List[Dict[str, Any]]
-        ) -> Tuple[int, int, int]:
+        ) -> Dict[str, Any]:
             """Process a batch of chunks: Extract -> Embed -> Store (Immediately)"""
-            logger.debug(f"Processing batch {batch_idx} ({len(chunk_batch)} chunks)...")
             
             # Extract entities and hyperedges
             batch_entities, batch_hyperedges, batch_links = await self._extract_from_chunks(chunk_batch)
@@ -147,7 +190,12 @@ class HyperGraphRAG:
                     entity_data_list, entity_embeddings
                 )
             
-            return len(batch_entities), len(batch_hyperedges), len(chunk_batch)
+            return {
+                "batch_idx": batch_idx,
+                "chunks": len(chunk_batch),
+                "entities": len(batch_entities),
+                "hyperedges": len(batch_hyperedges)
+            }
 
         
         # Process chunks in parallel batches using asyncio
@@ -157,38 +205,123 @@ class HyperGraphRAG:
         ]
         
         total_batches = len(chunk_batches)
-        logger.info(f"Total batches to process: {total_batches}")
         
         # Create semaphore to limit concurrent tasks
         semaphore = asyncio.Semaphore(max_concurrent_tasks)
         
         async def process_with_semaphore(idx, batch):
             async with semaphore:
-                start_t = time.time()
-                result = await process_chunk_batch_and_store(idx, batch)
-                duration = time.time() - start_t
-                
-                ent_cnt, edge_cnt, _ = result
-                logger.info(
-                    f"Progress: {idx + 1}/{total_batches} ({(idx + 1) / total_batches * 100:.1f}%) "
-                    f"- {duration:.2f}s | Ent: {ent_cnt}, Edge: {edge_cnt}"
-                )
-                return result
+                return await process_chunk_batch_and_store(idx, batch)
         
-        # Process all batches concurrently but store immediately
+        # Process all batches concurrently and yield results as they complete
         tasks = [process_with_semaphore(i, batch) for i, batch in enumerate(chunk_batches)]
-        results = await asyncio.gather(*tasks)
         
-        # Aggregate stats
-        total_entities = sum(r[0] for r in results)
-        total_hyperedges = sum(r[1] for r in results)
-        total_chunks = sum(r[2] for r in results)
+        completed_batches = 0
+        total_entities = 0
+        total_hyperedges = 0
+        total_chunks = 0
         
-        logger.info(
-            f"Successfully created {total_chunks} chunks, "
-            f"{total_entities} entities, and {total_hyperedges} hyperedges (Total)"
+        for future in asyncio.as_completed(tasks):
+            result = await future
+            completed_batches += 1
+            
+            # Aggregate stats
+            total_entities += result["entities"]
+            total_hyperedges += result["hyperedges"]
+            total_chunks += result["chunks"]
+            
+            yield {
+                "status": "processing",
+                "completed_batches": completed_batches,
+                "total_batches": total_batches,
+                "progress": completed_batches / total_batches * 100,
+                "batch_result": result,
+                "total_stats": {
+                    "chunks": total_chunks,
+                    "entities": total_entities,
+                    "hyperedges": total_hyperedges
+                }
+            }
+            
+        yield {
+            "status": "complete",
+            "total_stats": {
+                "chunks": total_chunks,
+                "entities": total_entities,
+                "hyperedges": total_hyperedges
+            }
+        }
+
+    async def insert_data(
+        self,
+        documents: List[str],
+        metadata: Optional[List[Dict[str, Any]]] = None,
+        batch_size: int = 10,
+        max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
+        show_progress: bool = True
+    ) -> None:
+        """
+        Insert document data and create hypergraph structure with async batch processing.
+        Displays a progress bar if tqdm is available and show_progress is True.
+        """
+        stream = self.insert_data_stream(
+            documents, 
+            metadata, 
+            batch_size, 
+            max_concurrent_tasks
         )
-    
+        
+        pbar = None
+            
+        async for update in stream:
+            status = update.get("status")
+            
+            if status == "chunking_complete":
+                # Chunking done, we might want to log this but pbar is for batches
+                logger.debug(f"Chunking complete: {update['total_chunks']} chunks created.")
+                
+                # Initialize pbar immediately after chunking
+                if show_progress and tqdm:
+                    total_chunks = update['total_chunks']
+                    total_batches = math.ceil(total_chunks / batch_size)
+                    pbar = tqdm(total=total_batches, desc="Processing Batches", unit="batch")
+                
+            elif status == "processing":
+                total_batches = update["total_batches"]
+                completed = update["completed_batches"]
+                
+                # Initialize pbar if not exists (fallback)
+                if pbar is None and show_progress and tqdm:
+                    pbar = tqdm(total=total_batches, desc="Processing Batches", unit="batch")
+                
+                if pbar:
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        "Ent": update["total_stats"]["entities"],
+                        "Edge": update["total_stats"]["hyperedges"]
+                    })
+                else:
+                    # Fallback logging if no tqdm
+                    logger.info(
+                        f"Progress: {completed}/{total_batches} ({update['progress']:.1f}%) "
+                        f"| Ent: {update['total_stats']['entities']}, Edge: {update['total_stats']['hyperedges']}"
+                    )
+            
+            elif status == "complete":
+                # Close pbar BEFORE logging completion
+                if pbar:
+                    pbar.close()
+                    pbar = None
+                    
+                stats = update["total_stats"]
+                logger.info(
+                    f"Successfully created {stats['chunks']} chunks, "
+                    f"{stats['entities']} entities, and {stats['hyperedges']} hyperedges (Total)"
+                )
+        
+        if pbar:
+            pbar.close()
+
     async def query_local(
         self,
         query_text: str,

@@ -1,4 +1,4 @@
-"""Example: Insert documents into Hypergraph RAG"""
+"""Example: Stream Insert documents into Hypergraph RAG with Text Logging"""
 import asyncio
 from hypergraphrag import HyperGraphRAG
 
@@ -9,7 +9,7 @@ async def main():
         chunk_overlap=50
     )
     
-    # Example documents to insert
+    # Example documents to insert (Same as basic_insert.py)
     documents = [
         """
         Artificial Intelligence (AI) is a technology designed to enable computer systems 
@@ -41,30 +41,52 @@ async def main():
         """
     ]
     
-    # Insert data with metadata
-    print("📝 Inserting documents into Hypergraph RAG...")
-    await rag.insert_data(
+    # Metadata
+    metadata = [
+        {"source": "ai_intro", "category": "basic", "topic": "AI"},
+        {"source": "nlp_intro", "category": "basic", "topic": "NLP"},
+        {"source": "rag_intro", "category": "advanced", "topic": "RAG"},
+        {"source": "vector_db", "category": "intermediate", "topic": "Database"},
+        {"source": "graph_db", "category": "intermediate", "topic": "Database"}
+    ]
+    
+    print("🚀 Starting Stream Insert...")
+    
+    # Insert data using stream method with manual logging
+    # Using batch_size=1 to see granular updates for this small dataset
+    async for update in rag.insert_data_stream(
         documents=documents,
-        metadata=[
-            {"source": "ai_intro", "category": "basic", "topic": "AI"},
-            {"source": "nlp_intro", "category": "basic", "topic": "NLP"},
-            {"source": "rag_intro", "category": "advanced", "topic": "RAG"},
-            {"source": "vector_db", "category": "intermediate", "topic": "Database"},
-            {"source": "graph_db", "category": "intermediate", "topic": "Database"}
-        ],
+        metadata=metadata,
         batch_size=1,
         max_concurrent_tasks=5
-    )
-    
-    print("✅ Documents inserted successfully!")
-    print("   - Documents are chunked and stored")
-    print("   - Entities and hyperedges are extracted")
-    print("   - Embeddings are generated and stored in Neo4j")
-    print("   - Graph structure is created in Neo4j")
+    ):
+        status = update["status"]
+        
+        if status == "chunking_complete":
+            print(f"📦 Chunking Complete: Total {update['total_chunks']} chunks ready.")
+            
+        elif status == "processing":
+            progress = update["progress"]
+            current = update["completed_batches"]
+            total = update["total_batches"]
+            stats = update["total_stats"]
+            
+            # Print single line log
+            print(
+                f"🔄 [Processing] Batch {current}/{total} ({progress:.1f}%) "
+                f"| Entities: {stats['entities']} | Hyperedges: {stats['hyperedges']} | Chunks: {stats['chunks']}"
+            )
+            
+        elif status == "complete":
+            print("\n✅ Insert Completed Successfully!")
+            print("📊 Final Statistics:")
+            final_stats = update["total_stats"]
+            print(f"   - Total Chunks:     {final_stats['chunks']}")
+            print(f"   - Total Entities:   {final_stats['entities']}")
+            print(f"   - Total Hyperedges: {final_stats['hyperedges']}")
     
     # Clean up resources
     rag.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
-
