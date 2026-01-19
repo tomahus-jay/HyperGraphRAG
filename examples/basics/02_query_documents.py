@@ -24,33 +24,23 @@ async def main():
         print("-" * 60)
         
         # Perform search
-        results = await rag.query_local(
+        results = await rag.query(
             query_text=query_text,
-            top_n=5,
-            max_hops=2
+            top_n=5
         )
         
         # Display results
         print(f"📊 Results:")
-        print(f"   - Chunks found: {results.total_chunks_found}")
-        print(f"   - Hyperedges found: {results.total_hyperedges_found}")
-        print(f"   - Entities found: {len(results.entities_found)}")
-        
-        # Show top chunks
-        if results.top_chunks:
-            print(f"\n🔝 Top {min(3, len(results.top_chunks))} Chunks:")
-            for j, chunk in enumerate(results.top_chunks[:3], 1):
-                print(f"\n   {j}. Score: {chunk.score:.4f}")
-                print(f"      Content: {chunk.content}")  # Full content
-                if chunk.entities:
-                    print(f"      Entities: {', '.join(chunk.entities[:3])}")
+        print(f"   - Hyperedges found: {len(results.hyperedges)}")
         
         # Show hyperedges
         if results.hyperedges:
             print(f"\n🔗 Top {min(5, len(results.hyperedges))} Hyperedges:")
             for j, hyperedge in enumerate(results.hyperedges[:5], 1):
                 print(f"\n   {j}. Content: {hyperedge.content}")
-                print(f"      Entities: {', '.join(hyperedge.entities)}")
+                print(f"      Entities: {', '.join(hyperedge.entity_names)}")
+                if hyperedge.chunks:
+                    print(f"      Source Chunk ID: {hyperedge.chunk_id}")
         
         print("\n" + "=" * 60 + "\n")
     

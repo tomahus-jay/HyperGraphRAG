@@ -6,7 +6,7 @@ from .prompts import (
     GRAPH_EXTRACTION_SYSTEM_PROMPT,
     GRAPH_EXTRACTION_USER_PROMPT_TEMPLATE
 )
-from .models import Entity, Hyperedge, EntityType, GraphExtractionResult
+from .models import Entity, Hyperedge, GraphExtractionResult
 from .logger import setup_logger
 
 load_dotenv()
@@ -132,7 +132,6 @@ class LLMExtractor:
                             # Create implicit entity object
                             new_entity = Entity(
                                 name=name_clean,
-                                type=EntityType.CONCEPT,
                                 description="Extracted from hyperedge relationship"
                             )
                             unique_entities.append(new_entity)

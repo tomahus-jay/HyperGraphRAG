@@ -5,13 +5,11 @@ import asyncio
 import time
 import json
 import math
-import numpy as np
-from numpy.linalg import norm
 from .neo4j_manager import Neo4jManager
 from .embedding import EmbeddingGenerator
 from .text_processor import TextProcessor
 from .llm_extractor import LLMExtractor
-from .models import QueryResult, ChunkSearchResult, HyperedgeInfo
+from .models import QueryResult, Hyperedge
 from .logger import setup_logger
 
 logger = setup_logger("hypergraphrag.client")
@@ -58,7 +56,8 @@ class HyperGraphRAG:
             model_name=embedding_model,
             api_key=embedding_api_key,
             base_url=embedding_base_url,
-            dimension=embedding_dimension
+            dimension=embedding_dimension,
+            timeout=llm_request_timeout
         )
 
         # Initialize Neo4j Manager with vector dimension
@@ -181,19 +180,19 @@ class HyperGraphRAG:
             """Process a batch of chunks: Extract -> Embed -> Store (Immediately)"""
             
             # Extract entities and hyperedges
-            batch_entities, batch_hyperedges, batch_links = await self._extract_from_chunks(chunk_batch)
+            batch_entities, batch_hyperedges = await self._extract_from_chunks(chunk_batch)
             
-            # Generate embeddings
-            chunk_embeddings, entity_embeddings, entity_data_list = await self._generate_batch_embeddings(
-                chunk_batch, batch_entities
+            # Generate embeddings (Hyperedges instead of Chunks)
+            hyperedge_embeddings, entity_embeddings = await self._generate_batch_embeddings(
+                batch_hyperedges, batch_entities
             )
             
             # Store immediately (with lock to prevent deadlocks)
             async with db_semaphore:
                 await self._store_batch(
-                    batch_entities, batch_hyperedges, batch_links,
-                    chunk_batch, chunk_embeddings,
-                    entity_data_list, entity_embeddings
+                    batch_entities, batch_hyperedges,
+                    chunk_batch, hyperedge_embeddings,
+                    entity_embeddings
                 )
             
             return {
@@ -328,78 +327,112 @@ class HyperGraphRAG:
         if pbar:
             pbar.close()
 
-    async def query_local(
+    async def _local_search(
         self,
         query_text: str,
-        top_n: int = 10,
-        max_hops: int = 2
+        top_n: int = 10
     ) -> QueryResult:
         """
-        Local search: Entity-centric graph traversal with Path Scoring and Re-ranking.
+        Local search: Find best hyperedges connected to relevant entities using Vector Search.
         """
-        logger.debug(f"Starting local search with max_hops={max_hops}, top_n={top_n}")
+        logger.debug(f"Starting local search with top_n={top_n}")
         
         # Step 1: Get initial entities from Neo4j (Vector Search)
         query_embedding = self.embedding.generate_embedding(query_text)
         top_entities = await self._search_initial_entities(query_embedding, top_n)
         
-        # Step 2: Initialize data structures
-        all_entities_found = set([e["name"] for e in top_entities])
-        visited_entities = set([e["name"] for e in top_entities])
-        # Initialize entity scores with similarity scores
-        entity_scores: Dict[str, float] = {e["name"]: e["similarity"] for e in top_entities}
+        entities_found = [e["name"] for e in top_entities]
         
-        visited_hyperedges: Set[str] = set()
-        all_hyperedges: Dict[str, Dict[str, Any]] = {}
+        # Step 2: Get BEST hyperedge for each entity using Vector Search on Hyperedges
+        # The user requested "Limit 1" per entity, based on hyperedge vector similarity.
         
-        # Step 3: 1-hop: Get hyperedges for top entities
-        limit_per_entity = min(top_n * 5, 100)
-        hop1_hyperedges = await self._get_hyperedges_for_entities(
-            [e["name"] for e in top_entities],
-            entity_scores,
-            visited_hyperedges,
-            all_hyperedges,
-            top_n=top_n,
-            limit_per_entity=limit_per_entity
-        )
-        logger.debug(f"Hop 1: Found {len(hop1_hyperedges)} hyperedges")
+        async def get_best_hyperedge(entity_name):
+            async with self.query_semaphore:
+                return await asyncio.to_thread(
+                    self.neo4j.get_best_hyperedges_with_entities, 
+                    entity_name,
+                    query_embedding,
+                    limit=1
+                )
         
-        # Step 4: Subsequent hops (if max_hops > 1)
-        if max_hops > 1:
-            await self._process_subsequent_hops(
-                hop1_hyperedges,
-                query_embedding,
-                top_n,
-                max_hops,
-                visited_entities,
-                entity_scores,
-                visited_hyperedges,
-                all_entities_found,
-                all_hyperedges
+        tasks = [get_best_hyperedge(name) for name in entities_found]
+        results = await asyncio.gather(*tasks)
+        
+        # Flatten results (list of lists -> list of dicts)
+        all_hyperedges = []
+        seen_ids = set()
+        
+        for res_list in results:
+            for he in res_list:
+                if he["hyperedge_id"] not in seen_ids:
+                    all_hyperedges.append(he)
+                    seen_ids.add(he["hyperedge_id"])
+        
+        # We might want to re-sort the final list by score, as entities were sorted by their own relevance,
+        # but the hyperedge relevance (score) is what matters now.
+        all_hyperedges.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Limit total results if needed, though top_n entities * 1 hyperedge = top_n hyperedges max roughly.
+        top_hyperedges = all_hyperedges[:top_n]
+        
+        logger.debug(f"Found {len(top_hyperedges)} unique best hyperedges")
+
+        # Step 3: Fetch chunks for these hyperedges (for content/metadata)
+        # Note: Hyperedge node now has content. We might not need to fetch Chunk node unless we need specific Chunk metadata.
+        # The Hyperedge model has `chunks` list.
+        # We have chunk_id in hyperedge.
+        
+        chunk_ids = set()
+        for he in top_hyperedges:
+            if he.get("chunk_id"):
+                chunk_ids.add(he["chunk_id"])
+        
+        chunks_map = {}
+        if chunk_ids:
+            chunks_data = await asyncio.to_thread(
+                self.neo4j.get_chunks_by_ids,
+                list(chunk_ids)
             )
+            for c in chunks_data:
+                chunks_map[c["id"]] = c
         
-        # Step 5: Retrieve chunks and build result
-        result_chunks = await self._retrieve_chunks_for_entities(
-            all_entities_found,
-            query_embedding,
-            limit=top_n
-        )
-        hyperedge_info = self._convert_hyperedges_to_info(all_hyperedges)
-        
-        logger.debug(
-            f"Local search completed: {len(result_chunks)} chunks, "
-            f"{len(hyperedge_info)} hyperedges, {len(all_entities_found)} entities"
-        )
-        
+        # Step 4: Construct Hyperedge objects
+        final_hyperedges = []
+        for he in top_hyperedges:
+            entity_names = he.get("entity_names", [])
+            
+            he_chunks = []
+            c_id = he.get("chunk_id")
+            if c_id and c_id in chunks_map:
+                c_data = chunks_map[c_id]
+                c_meta = c_data.get("metadata", {})
+                he_chunks.append({
+                    "id": c_data["id"],
+                    "content": c_data["content"],
+                    "metadata": c_meta,
+                    "entities": [] 
+                })
+            
+            # Parse metadata if string
+            meta = he.get("metadata", {})
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except:
+                    pass
+
+            final_hyperedges.append(Hyperedge(
+                hyperedge_id=he["hyperedge_id"],
+                entity_names=entity_names,
+                content=he["content"],
+                chunk_id=c_id,
+                chunks=he_chunks if he_chunks else None,
+                metadata=meta
+            ))
+            
         return QueryResult(
             query=query_text,
-            top_chunks=result_chunks,
-            hyperedges=hyperedge_info,
-            expanded_chunks=[],
-            total_chunks_found=len(result_chunks),
-            total_hyperedges_found=len(hyperedge_info),
-            total_expanded_chunks=0,
-            entities_found=list(all_entities_found)
+            hyperedges=final_hyperedges
         )
     
     async def _extract_from_chunks(
@@ -407,11 +440,11 @@ class HyperGraphRAG:
         chunk_batch: List[Dict[str, Any]]
     ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        Extract entities and hyperedges from a batch of chunks
+        Extract entities and hyperedges from a batch of chunks.
+        Filters out entities that are not part of any hyperedge to prevent orphan nodes.
         """
-        batch_entities = {}
+        all_potential_entities = {} # All entities extracted by LLM
         batch_hyperedges = []
-        batch_links = []
         
         # Process chunks concurrently using gather
         extraction_tasks = []
@@ -430,17 +463,14 @@ class HyperGraphRAG:
         for idx, (entities, hyperedges) in enumerate(extraction_results):
             chunk = chunk_batch[idx]
             
-            entity_names = []
+            # 1. Collect all potential entities from this chunk
             for entity in entities:
-                entity_name = entity.name
-                entity_type = entity.type.value if hasattr(entity.type, "value") else str(entity.type)
-                batch_entities[entity_name] = {
-                    "name": entity_name,
-                    "type": entity_type,
+                all_potential_entities[entity.name] = {
+                    "name": entity.name,
                     "description": entity.description
                 }
-                entity_names.append(entity_name)
             
+            # 2. Process hyperedges
             for hyperedge in hyperedges:
                 entity_names_sorted = sorted(hyperedge.entity_names)
                 # Create ID based on content and connected entities
@@ -448,48 +478,64 @@ class HyperGraphRAG:
                     f"{hyperedge.content}_{'_'.join(entity_names_sorted)}".encode()
                 ).hexdigest()
                 
-                # Add any new entities found in hyperedges (implicitly created)
-                for ent_name in hyperedge.entity_names:
-                    if ent_name not in batch_entities:
-                        batch_entities[ent_name] = {
-                            "name": ent_name,
-                            "type": "CONCEPT",
-                            "description": "Extracted from hyperedge relationship"
-                        }
-                    if ent_name not in entity_names:
-                        entity_names.append(ent_name)
-                
                 batch_hyperedges.append({
                     "hyperedge_id": hyperedge_id,
                     "entity_names": hyperedge.entity_names,
                     "content": hyperedge.content,
-                    "metadata": {"chunk_id": chunk["id"], **chunk["metadata"]}
-                })
-            
-            # Store chunk-entity links
-            if entity_names:
-                batch_links.append({
                     "chunk_id": chunk["id"],
-                    "entity_names": entity_names
+                    "metadata": chunk.get("metadata", {})
                 })
+
+        # 3. Filter entities: Only keep those used in hyperedges
+        used_entity_names = set()
+        for h in batch_hyperedges:
+            used_entity_names.update(h["entity_names"])
+            
+        batch_entities = {}
+        for name in used_entity_names:
+            if name in all_potential_entities:
+                # Use extracted info (description)
+                batch_entities[name] = all_potential_entities[name]
+            else:
+                # Implicit entity found in hyperedge but not in entity list
+                batch_entities[name] = {
+                    "name": name,
+                    "description": "Extracted from hyperedge relationship"
+                }
         
-        return batch_entities, batch_hyperedges, batch_links
+        return batch_entities, batch_hyperedges
     
     async def _generate_batch_embeddings(
         self,
-        chunk_batch: List[Dict[str, Any]],
+        batch_hyperedges: List[Dict[str, Any]],
         batch_entities: Dict[str, Dict[str, Any]]
-    ) -> Tuple[List[List[float]], List[List[float]], List[Dict[str, Any]]]:
+    ) -> Tuple[List[List[float]], List[List[float]]]:
         """
-        Generate embeddings for chunks and entities in a batch
+        Generate embeddings for hyperedges and entities in a batch
         """
-        chunk_contents = [chunk["content"] for chunk in chunk_batch]
-        chunk_embeddings = await asyncio.to_thread(
-            self.embedding.generate_embeddings,
-            chunk_contents
-        )
+        hyperedge_contents = [h["content"] for h in batch_hyperedges]
+        if hyperedge_contents:
+            hyperedge_embeddings = await asyncio.to_thread(
+                self.embedding.generate_embeddings,
+                hyperedge_contents
+            )
+        else:
+             hyperedge_embeddings = []
         
-        entity_texts, entity_data_list = self._prepare_entity_embeddings(batch_entities)
+        # Prepare entity texts for embedding (inline logic, removed _prepare_entity_embeddings)
+        entity_texts = []
+        # entity_data_list removal: We rely on batch_entities ordering
+        
+        for entity_name, entity_info in batch_entities.items():
+            # description is optional
+            desc = entity_info.get("description")
+            if desc:
+                text = f"{entity_name}: {desc}"
+            else:
+                text = entity_name
+                
+            entity_texts.append(text)
+
         if entity_texts:
             entity_embeddings = await asyncio.to_thread(
                 self.embedding.generate_embeddings,
@@ -498,38 +544,38 @@ class HyperGraphRAG:
         else:
             entity_embeddings = []
         
-        return chunk_embeddings, entity_embeddings, entity_data_list
-    
+        return hyperedge_embeddings, entity_embeddings
+
     async def _store_batch(
         self,
         batch_entities: Dict[str, Dict[str, Any]],
         batch_hyperedges: List[Dict[str, Any]],
-        batch_links: List[Dict[str, Any]],
         chunk_batch: List[Dict[str, Any]],
-        chunk_embeddings: List[List[float]],
-        entity_data_list: List[Dict[str, Any]],
+        hyperedge_embeddings: List[List[float]],
         entity_embeddings: List[List[float]]
     ) -> None:
-        """Store extracted data to Neo4j (including vectors)"""
+        """Store extracted data to Neo4j (including vectors for entities and hyperedges)"""
         import time
         start_time = time.time()
         
         # 1. Store entities with vectors
         t0 = time.time()
         # Merge vector data into batch_entities dict for Neo4j processing
+        # Use keys() to ensure order matches embeddings (Python dict preserves insertion order)
         if batch_entities:
-            # Create a map of entity_name -> embedding for easy lookup
-            entity_embedding_map = {
-                data["entity_name"]: embedding
-                for data, embedding in zip(entity_data_list, entity_embeddings)
-            }
-            
             entities_to_store = []
-            for name, info in batch_entities.items():
-                info_with_vector = info.copy()
-                if name in entity_embedding_map:
-                    info_with_vector["vector"] = entity_embedding_map[name]
-                entities_to_store.append(info_with_vector)
+            entity_keys = list(batch_entities.keys())
+            
+            if len(entity_keys) == len(entity_embeddings):
+                for i, key in enumerate(entity_keys):
+                    info = batch_entities[key]
+                    info_with_vector = info.copy()
+                    info_with_vector["vector"] = entity_embeddings[i]
+                    entities_to_store.append(info_with_vector)
+            else:
+                # Fallback: Store without vectors if count mismatch (should not happen)
+                logger.warning("Entity embedding count mismatch. Storing entities without vectors.")
+                entities_to_store = list(batch_entities.values())
             
             await asyncio.to_thread(
                 self.neo4j.batch_create_entities, 
@@ -537,18 +583,17 @@ class HyperGraphRAG:
             )
         t1 = time.time()
         logger.debug(f"[Profile] Store Entities ({len(batch_entities)}): {t1-t0:.4f}s")
-
-        # 2. Store Chunks with vectors
+        
+        # 2. Store Chunks (NO vectors)
         t0 = time.time()
         if chunk_batch:
             chunks_to_store = [
                 {
                     "chunk_id": chunk["id"],
                     "content": chunk["content"],
-                    "metadata": chunk["metadata"],
-                    "vector": embedding
+                    "metadata": chunk.get("metadata", {})
                 }
-                for chunk, embedding in zip(chunk_batch, chunk_embeddings)
+                for chunk in chunk_batch
             ]
             await asyncio.to_thread(
                 self.neo4j.batch_create_chunks,
@@ -557,56 +602,25 @@ class HyperGraphRAG:
         t1 = time.time()
         logger.debug(f"[Profile] Store Chunks ({len(chunk_batch)}): {t1-t0:.4f}s")
 
-        # 3. Store relationships
-        t0 = time.time()
-        if batch_links:
-            await asyncio.to_thread(
-                self.neo4j.batch_link_chunks_to_entities, 
-                batch_links
-            )
-        t1 = time.time()
-        logger.debug(f"[Profile] Store Links ({len(batch_links)}): {t1-t0:.4f}s")
-        
-        # 4. Store Hyperedges
+        # 3. Store Hyperedges with vectors
         t0 = time.time()
         if batch_hyperedges:
+            hyperedges_to_store = []
+            for h, embedding in zip(batch_hyperedges, hyperedge_embeddings):
+                 h_with_vector = h.copy()
+                 h_with_vector["vector"] = embedding
+                 hyperedges_to_store.append(h_with_vector)
+
             await asyncio.to_thread(
-                self.neo4j.batch_create_hyperedges, 
-                batch_hyperedges
+                self.neo4j.batch_create_hyperedges,
+                hyperedges_to_store
             )
         t1 = time.time()
         logger.debug(f"[Profile] Store Hyperedges ({len(batch_hyperedges)}): {t1-t0:.4f}s")
-
+        
         total_time = time.time() - start_time
         logger.debug(f"[Profile] Total Batch Store Time: {total_time:.4f}s")
-    
-    def _prepare_entity_embeddings(
-        self,
-        all_entities: Dict[str, Dict[str, Any]]
-    ) -> Tuple[List[str], List[Dict[str, Any]]]:
-        """
-        Prepare entity texts for embedding generation
-        """
-        entity_texts = []
-        entity_data_list = []
-        
-        for entity_name, entity_info in all_entities.items():
-            entity_text = self._create_entity_text(entity_name, entity_info.get("description"))
-            entity_texts.append(entity_text)
-            entity_data_list.append({
-                "entity_name": entity_name,
-                "entity_type": entity_info.get("type"),
-                "description": entity_info.get("description")
-            })
-        
-        return entity_texts, entity_data_list
-    
-    def _create_entity_text(self, entity_name: str, description: Optional[str] = None) -> str:
-        """Create entity text for embedding (name + description)"""
-        if description:
-            return f"{entity_name}: {description}"
-        return entity_name
-    
+
     async def _search_initial_entities(
         self,
         query_embedding: List[float],
@@ -628,393 +642,22 @@ class HyperGraphRAG:
         return [
             {
                 "name": ent["name"],
-                "type": ent.get("type"),
                 "description": ent.get("description"),
                 "similarity": ent["score"]
             }
             for ent in entity_results
         ]
     
-    async def _get_hyperedges_for_entities(
-        self,
-        entity_names: List[str],
-        entity_scores: Dict[str, float],
-        visited_hyperedges: Set[str],
-        all_hyperedges: Dict[str, Dict[str, Any]],
-        top_n: int = 10,
-        limit_per_entity: int = 50
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Get hyperedges for given entities (async) with Beam Search Pruning
-        """
-        hop_hyperedges: Dict[str, Dict[str, Any]] = {}
-        
-        # Process entities concurrently
-        async def get_hyperedges_for_entity(entity_name: str):
-            async with self.query_semaphore:
-                hyperedges = await asyncio.to_thread(
-                    self.neo4j.get_hyperedges_by_entity,
-                    entity_name,
-                    limit=limit_per_entity
-                )
-                return entity_name, hyperedges
-        
-        # Get hyperedges for all entities concurrently
-        tasks = [get_hyperedges_for_entity(name) for name in entity_names]
-        results = await asyncio.gather(*tasks)
-        
-        # Collect all unique hyperedges and their best source score
-        all_hyperedge_data = {}  # hyperedge_id -> (hyperedge_data, max_source_score)
-        
-        for entity_name, hyperedges in results:
-            source_score = entity_scores.get(entity_name, 0.0)
-            
-            for hyperedge in hyperedges:
-                hyperedge_id = hyperedge["hyperedge_id"]
-                if hyperedge_id not in visited_hyperedges:
-                    if hyperedge_id not in all_hyperedge_data:
-                        all_hyperedge_data[hyperedge_id] = (hyperedge, source_score)
-                    else:
-                        # Update max source score if we found a better path to this hyperedge
-                        current_data, current_max = all_hyperedge_data[hyperedge_id]
-                        if source_score > current_max:
-                            all_hyperedge_data[hyperedge_id] = (current_data, source_score)
-        
-        # Beam Search: Sort by score and take top_n
-        sorted_candidates = sorted(
-            all_hyperedge_data.items(),
-            key=lambda item: item[1][1],  # source_score
-            reverse=True
-        )
-        top_candidates = sorted_candidates[:top_n]
-        final_hyperedge_data = dict(top_candidates)
-        
-        # Get entities for selected hyperedges concurrently
-        async def get_entities_for_hyperedge(hyperedge_id: str):
-            async with self.query_semaphore:
-                entities = await asyncio.to_thread(
-                    self.neo4j.get_entities_by_hyperedge,
-                    hyperedge_id
-                )
-                return hyperedge_id, entities
-        
-        # Process hyperedges and get their entities
-        tasks = []
-        for hyperedge_id, (hyperedge, source_score) in final_hyperedge_data.items():
-            if hyperedge_id in visited_hyperedges:
-                continue
-            
-            visited_hyperedges.add(hyperedge_id)
-            tasks.append(get_entities_for_hyperedge(hyperedge_id))
-            
-        if tasks:
-            results = await asyncio.gather(*tasks)
-            
-            for hyperedge_id, entities_in_hyperedge in results:
-                # Retrieve original data
-                hyperedge, source_score = final_hyperedge_data[hyperedge_id]
-                
-                entity_names_in_hyperedge = [e["name"] for e in entities_in_hyperedge]
-                
-                # Store hyperedge info with source score
-                hyperedge_info = {
-                    "hyperedge_id": hyperedge_id,
-                    "entities": entity_names_in_hyperedge,
-                    "content": hyperedge.get("content", ""),
-                    "source_score": source_score  # Added for Path Scoring
-                }
-                hop_hyperedges[hyperedge_id] = hyperedge_info
-                all_hyperedges[hyperedge_id] = hyperedge_info
-        
-        return hop_hyperedges
-    
-    async def _process_subsequent_hops(
-        self,
-        previous_hop_hyperedges: Dict[str, Dict[str, Any]],
-        query_embedding: List[float],
-        top_n: int,
-        max_hops: int,
-        visited_entities: Set[str],
-        entity_scores: Dict[str, float],
-        visited_hyperedges: Set[str],
-        all_entities_found: Set[str],
-        all_hyperedges: Dict[str, Dict[str, Any]]
-    ) -> None:
-        """
-        Process subsequent hops in graph traversal
-        """
-        current_hop_hyperedges = previous_hop_hyperedges
-        
-        for hop in range(2, max_hops + 1):
-            logger.debug(f"Hop {hop}: Exploring entities from previous hop's hyperedges...")
-            
-            # Get candidate entities and their parent scores from current hop's hyperedges
-            candidate_entities, candidate_parent_scores = self._get_candidate_entities(
-                current_hop_hyperedges,
-                visited_entities
-            )
-            
-            if not candidate_entities:
-                logger.debug(f"No new entities to explore at hop {hop}")
-                break
-            
-            logger.debug(f"Found {len(candidate_entities)} candidate entities (not visited)")
-            
-            # Select top entities based on Path Scoring
-            selected_entities, new_scores = await self._select_top_entities_by_similarity(
-                candidate_entities,
-                candidate_parent_scores,
-                query_embedding,
-                top_n
-            )
-            
-            if not selected_entities:
-                logger.debug(f"No entities selected for hop {hop}")
-                break
-            
-            logger.debug(f"Selected top {len(selected_entities)} entities for hop {hop}")
-            
-            # Update entity scores with new path scores
-            entity_scores.update(new_scores)
-            
-            # Mark as visited and update sets
-            visited_entities.update(selected_entities)
-            all_entities_found.update(selected_entities)
-            
-            # Get hyperedges for selected entities
-            limit_per_entity = min(top_n * 5, 100)
-            current_hop_hyperedges = await self._get_hyperedges_for_entities(
-                selected_entities,
-                entity_scores,
-                visited_hyperedges,
-                all_hyperedges,
-                top_n=top_n,
-                limit_per_entity=limit_per_entity
-            )
-            
-            logger.debug(f"Hop {hop}: Found {len(current_hop_hyperedges)} new hyperedges")
-    
-    def _get_candidate_entities(
-        self,
-        hyperedges: Dict[str, Dict[str, Any]],
-        visited_entities: Set[str]
-    ) -> Tuple[Set[str], Dict[str, float]]:
-        """
-        Get candidate entities from hyperedges, excluding visited ones
-        """
-        candidate_entities = set()
-        candidate_parent_scores = {}
-        
-        for hyperedge_info in hyperedges.values():
-            source_score = hyperedge_info.get("source_score", 0.0)
-            
-            for entity in hyperedge_info["entities"]:
-                if entity not in visited_entities:
-                    candidate_entities.add(entity)
-                    # If entity is reached by multiple hyperedges, take the max parent score
-                    if entity not in candidate_parent_scores or source_score > candidate_parent_scores[entity]:
-                        candidate_parent_scores[entity] = source_score
-                        
-        return candidate_entities, candidate_parent_scores
-    
-    async def _select_top_entities_by_similarity(
-        self,
-        candidate_entities: Set[str],
-        candidate_parent_scores: Dict[str, float],
-        query_embedding: List[float],
-        top_n: int
-    ) -> Tuple[List[str], Dict[str, float]]:
-        """
-        Select top N entities from candidates based on Path Scoring (async)
-        Using Neo4j Vector Search instead of Qdrant
-        """
-        if not candidate_entities:
-            return [], {}
-        
-        # Search in Neo4j and filter to candidates (async)
-        search_limit = max(top_n * DEFAULT_ENTITY_SEARCH_MULTIPLIER, len(candidate_entities))
-        entity_search_results = await asyncio.to_thread(
-            self.neo4j.search_vectors,
-            query_embedding,
-            search_limit,
-            target_node="Entity"
-        )
-        
-        filtered_results = []
-        for res in entity_search_results:
-            name = res["name"] # Neo4j uses 'name'
-            if name in candidate_entities:
-                similarity = res["score"]
-                parent_score = candidate_parent_scores.get(name, 0.0)
-                
-                # Calculate Path Score
-                final_score = (
-                    similarity * PATH_SCORE_SIMILARITY_WEIGHT + 
-                    parent_score * PATH_SCORE_PARENT_WEIGHT
-                )
-                
-                res["final_score"] = final_score
-                res["entity_name"] = name # Map for compatibility
-                filtered_results.append(res)
-        
-        # Sort by final score
-        filtered_results.sort(key=lambda x: x["final_score"], reverse=True)
-        
-        # Select top N
-        top_results = filtered_results[:top_n]
-        
-        selected_entities = [r["entity_name"] for r in top_results]
-        new_scores = {r["entity_name"]: r["final_score"] for r in top_results}
-        
-        return selected_entities, new_scores
-    
-    def _compute_cosine_similarity(self, vec_a: List[float], vec_b: List[float]) -> float:
-        """Calculate cosine similarity between two vectors"""
-        if not vec_a or not vec_b:
-            return 0.0
-        
-        a = np.array(vec_a)
-        b = np.array(vec_b)
-        
-        # Handle zero vectors
-        norm_a = norm(a)
-        norm_b = norm(b)
-        
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-            
-        return float(np.dot(a, b) / (norm_a * norm_b))
-
-    async def _retrieve_chunks_for_entities(
-        self,
-        entity_names: Set[str],
-        query_embedding: List[float],
-        limit: int = 10
-    ) -> List[ChunkSearchResult]:
-        """
-        Retrieve, Score, and Rank chunks for given entities.
-        Revised to use Neo4j for Chunk retrieval and scoring.
-        """
-        logger.debug("Retrieving and ranking chunks...")
-        
-        # Strategy:
-        # 1. Get all Chunk IDs connected to found entities (Graph Traversal)
-        # 2. Retrieve vectors for these chunks (Neo4j Search/Lookup)
-        #    Note: Since Neo4j doesn't support "get vectors for these specific IDs" easily efficiently in one go
-        #    without index lookup or extensive matching, and we need to score them.
-        
-        # Alternative Strategy (Simpler):
-        # 1. Perform Vector Search on Chunks globally to find top relevant chunks
-        # 2. Boost or filter by whether they are connected to the found entities?
-        
-        # Current Strategy Implementation (Mimicking previous logic):
-        # 1. Find chunks connected to entities
-        # 2. Calculate similarity manually (or use Neo4j to calc distance if we could query by ID)
-        
-        # Step 1: Get Chunks connected to entities
-        # We can do this with a single Cypher query for efficiency, but let's stick to the manager pattern
-        all_chunk_ids = set()
-        
-        async def get_chunks_for_entity(entity_name: str):
-            async with self.query_semaphore:
-                chunk_ids = await asyncio.to_thread(
-                    self.neo4j.get_chunks_by_entity,
-                    entity_name
-                )
-                return chunk_ids
-        
-        tasks = [get_chunks_for_entity(name) for name in entity_names]
-        results = await asyncio.gather(*tasks)
-        
-        for chunk_ids in results:
-            all_chunk_ids.update(chunk_ids)
-        
-        if not all_chunk_ids:
-            logger.debug("No chunks found linked to entities.")
-            # Fallback: Perform global vector search on chunks if no graph connections found?
-            # For now, return empty as per original logic
-            return []
-            
-        logger.debug(f"Found {len(all_chunk_ids)} candidate chunks.")
-        
-        # Optimization: Instead of fetching all vectors to python and calculating cosine similarity,
-        # We can ask Neo4j to calculate similarity for these specific chunks.
-        # However, retrieving vectors is also fine for reasonable batch sizes.
-        
-        # Let's fetch the chunks data (including vectors)
-        # We'll need a method in Neo4jManager to "get chunks by ids"
-        # Since we didn't add that specifically, let's add a helper logic here using cypher
-        
-        def fetch_chunk_data(c_ids):
-             with self.neo4j.driver.session() as session:
-                result = session.run("""
-                    UNWIND $ids AS id
-                    MATCH (c:Chunk {id: id})
-                    RETURN c.id as chunk_id, c.content as content, c.embedding as vector, c.metadata as metadata
-                """, ids=list(c_ids))
-                return [dict(record) for record in result]
-
-        chunk_data_list = await asyncio.to_thread(fetch_chunk_data, all_chunk_ids)
-        
-        ranked_chunks = []
-        
-        for data in chunk_data_list:
-            chunk_vector = data.get("vector")
-            if not chunk_vector:
-                continue
-                
-            content = data.get("content", "")
-            chunk_id = data.get("chunk_id")
-            
-            # Deserialize metadata
-            metadata = data.get("metadata", {})
-            if isinstance(metadata, str):
-                try:
-                    metadata = json.loads(metadata)
-                except:
-                    pass
-            
-            relevance_score = self._compute_cosine_similarity(query_embedding, chunk_vector)
-            entities_in_chunk = [] # Could populate this if needed
-            
-            ranked_chunks.append(ChunkSearchResult(
-                chunk_id=chunk_id,
-                content=content,
-                score=relevance_score,
-                entities=entities_in_chunk,
-                metadata=metadata
-            ))
-        
-        ranked_chunks.sort(key=lambda x: x.score, reverse=True)
-        final_results = ranked_chunks[:limit]
-        
-        logger.debug(f"Returned top {len(final_results)} chunks after re-ranking.")
-        return final_results
-    
-    def _convert_hyperedges_to_info(
-        self,
-        all_hyperedges: Dict[str, Dict[str, Any]]
-    ) -> List[HyperedgeInfo]:
-        """Convert hyperedge dictionaries to HyperedgeInfo objects"""
-        return [
-            HyperedgeInfo(
-                hyperedge_id=he["hyperedge_id"],
-                entities=he["entities"],
-                content=he["content"]
-            )
-            for he in all_hyperedges.values()
-        ]
-    
     async def query(
         self,
         query_text: str,
-        top_n: int = 10,
-        max_hops: int = 2
+        top_n: int = 10
     ) -> QueryResult:
         """
         Main query interface for Hypergraph RAG.
         """
-        return await self.query_local(query_text, top_n=top_n, max_hops=max_hops)
+        # max_hops is currently ignored in simplified local search
+        return await self._local_search(query_text, top_n=top_n)
     
     def reset_database(self):
         """Reset Neo4j graph (including vectors)"""

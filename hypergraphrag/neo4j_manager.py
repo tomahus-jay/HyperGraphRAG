@@ -62,11 +62,11 @@ class Neo4jManager:
                 except Exception:
                     continue
 
-            # Create Vector Index for Chunk
+            # Create Vector Index for Hyperedge
             try:
                 session.run("""
-                    CREATE VECTOR INDEX chunk_embedding_index IF NOT EXISTS
-                    FOR (c:Chunk) ON (c.embedding)
+                    CREATE VECTOR INDEX hyperedge_embedding_index IF NOT EXISTS
+                    FOR (h:Hyperedge) ON (h.embedding)
                     OPTIONS {indexConfig: {
                         `vector.dimensions`: $dim,
                         `vector.similarity_function`: 'cosine'
@@ -123,7 +123,6 @@ class Neo4jManager:
     def create_or_update_entity(
         self,
         entity_name: str,
-        entity_type: str,
         description: Optional[str] = None,
         vector: Optional[List[float]] = None
     ):
@@ -132,17 +131,17 @@ class Neo4jManager:
             session.run("""
                 MERGE (e:Entity {name: $name})
                 ON CREATE SET e.created_at = datetime(), e.chunk_ids = []
-                SET e.type = $type,
-                    e.description = COALESCE($description, e.description),
+                SET e.description = COALESCE($description, e.description),
                     e.embedding = $vector,
                     e.updated_at = datetime()
-            """, name=entity_name, type=entity_type, description=description, vector=vector)
+            """, name=entity_name, description=description, vector=vector)
     
     def create_hyperedge(
         self,
         hyperedge_id: str,
         entity_names: List[str],
         content: str,
+        chunk_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
         """Create hyperedge connecting multiple entities"""
@@ -153,11 +152,13 @@ class Neo4jManager:
                 MERGE (h:Hyperedge {id: $hyperedge_id})
                 ON CREATE SET h.created_at = datetime()
                 SET h.content = $content,
+                    h.chunk_id = $chunk_id,
                     h.metadata = $metadata,
                     h.updated_at = datetime()
             """, 
                 hyperedge_id=hyperedge_id,
                 content=content,
+                chunk_id=chunk_id,
                 metadata=metadata_json
             )
             
@@ -169,24 +170,6 @@ class Neo4jManager:
                     MERGE (e)-[:PARTICIPATES_IN]->(h)
                 """, entity_name=entity_name, hyperedge_id=hyperedge_id)
     
-    def link_chunk_to_entities(
-        self,
-        chunk_id: str,
-        entity_names: List[str]
-    ):
-        """Link a chunk to entities using chunk_ids property (No Relationship)"""
-        with self.driver.session() as session:
-            for entity_name in entity_names:
-                session.run("""
-                    MATCH (e:Entity {name: $entity_name})
-                    SET e.chunk_ids = 
-                        CASE 
-                            WHEN e.chunk_ids IS NULL THEN [$chunk_id]
-                            WHEN NOT $chunk_id IN e.chunk_ids THEN e.chunk_ids + $chunk_id
-                            ELSE e.chunk_ids
-                        END
-                """, entity_name=entity_name, chunk_id=chunk_id)
-    
     def batch_create_entities(self, entities: List[Dict[str, Any]]):
         """Batch create or update entities with embeddings"""
         if not entities:
@@ -197,16 +180,13 @@ class Neo4jManager:
                 UNWIND $entities AS entity
                 MERGE (e:Entity {name: entity.name})
                 ON CREATE SET 
-                    e.created_at = datetime(),
-                    e.chunk_ids = []
-                SET e.type = entity.type,
-                    e.description = COALESCE(entity.description, e.description),
+                    e.created_at = datetime()
+                SET e.description = COALESCE(entity.description, e.description),
                     e.embedding = entity.vector,
                     e.updated_at = datetime()
             """, entities=[
                 {
                     "name": e["name"],
-                    "type": e["type"],
                     "description": e.get("description"),
                     "vector": e.get("vector")
                 }
@@ -214,11 +194,7 @@ class Neo4jManager:
             ])
     
     def batch_create_chunks(self, chunks: List[Dict[str, Any]]):
-        """
-        Batch create Chunk nodes with embeddings.
-        Note: These chunks are NOT connected to entities via relationships.
-        They exist only for Vector Search capabilities.
-        """
+        """Batch create chunks (nodes only, no vector index)"""
         if not chunks:
             return
 
@@ -229,38 +205,16 @@ class Neo4jManager:
                 ON CREATE SET 
                     c.created_at = datetime()
                 SET c.content = chunk.content,
-                    c.embedding = chunk.vector,
                     c.metadata = chunk.metadata,
                     c.updated_at = datetime()
             """, chunks=[
                 {
                     "chunk_id": c["chunk_id"],
                     "content": c["content"],
-                    "vector": c["vector"],
                     "metadata": json.dumps(c.get("metadata", {}), ensure_ascii=False) if isinstance(c.get("metadata"), dict) else c.get("metadata", "{}")
                 }
                 for c in chunks
             ])
-
-    def batch_link_chunks_to_entities(self, chunk_entity_links: List[Dict[str, Any]]):
-        """
-        Batch link chunks to entities by updating chunk_ids property (No Relationship)
-        """
-        if not chunk_entity_links:
-            return
-        
-        with self.driver.session() as session:
-            session.run("""
-                UNWIND $links AS link
-                UNWIND link.entity_names AS entity_name
-                MATCH (e:Entity {name: entity_name})
-                SET e.chunk_ids = 
-                    CASE 
-                        WHEN e.chunk_ids IS NULL THEN [link.chunk_id]
-                        WHEN NOT link.chunk_id IN e.chunk_ids THEN e.chunk_ids + link.chunk_id
-                        ELSE e.chunk_ids
-                    END
-            """, links=chunk_entity_links)
     
     def batch_create_hyperedges(self, hyperedges: List[Dict[str, Any]]):
         """Batch create hyperedges"""
@@ -274,13 +228,17 @@ class Neo4jManager:
                 MERGE (hyperedge:Hyperedge {id: h.hyperedge_id})
                 ON CREATE SET hyperedge.created_at = datetime()
                 SET hyperedge.content = h.content,
+                    hyperedge.chunk_id = h.chunk_id,
                     hyperedge.metadata = h.metadata,
+                    hyperedge.embedding = h.vector,
                     hyperedge.updated_at = datetime()
             """, hyperedges=[
                 {
                     "hyperedge_id": h["hyperedge_id"],
                     "content": h["content"],
-                    "metadata": json.dumps(h.get("metadata", {}), ensure_ascii=False)
+                    "chunk_id": h.get("chunk_id"),
+                    "metadata": json.dumps(h.get("metadata", {}), ensure_ascii=False),
+                    "vector": h.get("vector")
                 }
                 for h in hyperedges
             ])
@@ -302,7 +260,7 @@ class Neo4jManager:
         with self.driver.session() as session:
             result = session.run("""
                 MATCH (e:Entity)-[:PARTICIPATES_IN]->(h:Hyperedge {id: $hyperedge_id})
-                RETURN e.name as name, e.type as type, e.description as description
+                RETURN e.name as name, e.description as description
             """, hyperedge_id=hyperedge_id)
             
             return [dict(record) for record in result]
@@ -312,11 +270,36 @@ class Neo4jManager:
         with self.driver.session() as session:
             result = session.run("""
                 MATCH (e:Entity {name: $entity_name})-[:PARTICIPATES_IN]->(h:Hyperedge)
-                RETURN h.id as hyperedge_id, h.content as content, h.metadata as metadata
+                MATCH (other:Entity)-[:PARTICIPATES_IN]->(h)
+                RETURN h.id as hyperedge_id, h.content as content, h.chunk_id as chunk_id, h.metadata as metadata, collect(other.name) as entity_names
                 LIMIT $limit
             """, entity_name=entity_name, limit=limit)
             
             return [dict(record) for record in result]
+
+    def get_chunks_by_ids(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
+        """Get chunks by their IDs"""
+        if not chunk_ids:
+            return []
+            
+        with self.driver.session() as session:
+            result = session.run("""
+                UNWIND $chunk_ids AS chunk_id
+                MATCH (c:Chunk {id: chunk_id})
+                RETURN c.id as id, c.content as content, c.metadata as metadata, c.embedding as vector
+            """, chunk_ids=chunk_ids)
+            
+            results = []
+            for record in result:
+                data = dict(record)
+                # Deserialize metadata if it's a string
+                if "metadata" in data and isinstance(data["metadata"], str):
+                    try:
+                        data["metadata"] = json.loads(data["metadata"])
+                    except:
+                        pass
+                results.append(data)
+            return results
     
     def get_chunks_by_entity(self, entity_name: str) -> List[str]:
         """Get chunk IDs that mention an entity (from Entity properties)"""
@@ -341,7 +324,7 @@ class Neo4jManager:
             result = session.run("""
                 MATCH path = (start:Entity {name: $entity_name})-[:PARTICIPATES_IN*1..$max_depth]-(end:Entity)
                 WHERE start <> end
-                RETURN DISTINCT end.name as name, end.type as type, 
+                RETURN DISTINCT end.name as name, 
                        end.description as description, length(path) as distance
                 ORDER BY distance
                 LIMIT 50
@@ -367,8 +350,12 @@ class Neo4jManager:
         target_node: str = "Chunk"
     ) -> List[Dict[str, Any]]:
         """Search nodes by vector similarity"""
-        index_name = "chunk_embedding_index" if target_node == "Chunk" else "entity_embedding_index"
-        
+        index_name = "chunk_embedding_index"
+        if target_node == "Entity":
+            index_name = "entity_embedding_index"
+        elif target_node == "Hyperedge":
+            index_name = "hyperedge_embedding_index"
+            
         with self.driver.session() as session:
             result = session.run(f"""
                 CALL db.index.vector.queryNodes($index_name, $k, $query_vector)
@@ -392,6 +379,35 @@ class Neo4jManager:
                     "score": record["score"]
                 })
             return results
+
+    def get_best_hyperedges_with_entities(
+        self,
+        entity_name: str,
+        query_vector: List[float],
+        limit: int = 1
+    ) -> List[Dict[str, Any]]:
+        """
+        Find best hyperedges connected to an entity using vector similarity.
+        """
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (e:Entity {name: $name})-[:PARTICIPATES_IN]->(h:Hyperedge)
+                WHERE h.embedding IS NOT NULL
+                WITH h, vector.similarity.cosine(h.embedding, $query_vector) AS score
+                ORDER BY score DESC
+                LIMIT $limit
+                
+                MATCH (connected_end:Entity)-[:PARTICIPATES_IN]->(h)
+                RETURN 
+                    h.id as hyperedge_id, 
+                    h.content as content, 
+                    h.chunk_id as chunk_id, 
+                    h.metadata as metadata, 
+                    score,
+                    collect(connected_end.name) as entity_names
+            """, name=entity_name, query_vector=query_vector, limit=limit)
+            
+            return [dict(record) for record in result]
 
     def reset_db(self):
         """Delete all nodes and relationships"""

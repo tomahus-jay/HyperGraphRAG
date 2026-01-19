@@ -21,9 +21,9 @@ GRAPH_EXTRACTION_USER_PROMPT_TEMPLATE = """Analyze the following text and extrac
 
 **Example Extraction:**
 - Entities:
-  - "Elon Musk" (PERSON): Entrepreneur and founder of SpaceX
-  - "SpaceX" (ORGANIZATION): Aerospace manufacturer founded by Elon Musk
-  - "2002" (DATE): Year SpaceX was founded
+  - "Elon Musk": Entrepreneur and founder of SpaceX
+  - "SpaceX": Aerospace manufacturer founded by Elon Musk
+  - "2002": Year SpaceX was founded
 - Hyperedges:
   - ["Elon Musk", "SpaceX", "2002"]: "Elon Musk founded SpaceX in 2002."
   - ["SpaceX", "Elon Musk"]: "SpaceX was founded by Elon Musk with the goal of reducing space transportation costs."

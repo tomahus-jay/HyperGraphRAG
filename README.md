@@ -108,17 +108,13 @@ Query 1: What other titles did the magazine Science Fantasy appear under?
    - Hyperedges found: 11
    - Entities found: 9
 
-🔝 Top 2 Chunks:
-   1. Score: 0.6670
-      Content: Science Fantasy (magazine)
-      Science Fantasy, which also appeared under the titles Impulse and SF Impulse, was a British fantasy and science fiction magazine, launched in 1950 by Nova Publications as a companion to Nova's "New Worlds".  Walter Gillings was editor for the first two issues, and was then replaced by John Carnell, the editor of "New Worlds", as a cost-saving measure.  Carnell edited both magazines until Nova went out of business in early 1964.  The titles were acquired by Roberts & Vi
-   ...
-
-🔗 Top 5 Hyperedges:
+🔝 Top 5 Hyperedges:
    1. Content: Impulse was changed to SF Impulse for the last few issues.
       Entities: Impulse, SF Impulse
+      Source Chunk ID: ...
    2. Content: Kyril Bonfiglioli changed the title of Science Fantasy to Impulse in early 1966.
       Entities: Impulse, Kyril Bonfiglioli, Science Fantasy
+      Source Chunk ID: ...
    3. Content: Science Fantasy appeared under the titles Impulse and SF Impulse.
       Entities: Science Fantasy, Impulse, SF Impulse
    ...

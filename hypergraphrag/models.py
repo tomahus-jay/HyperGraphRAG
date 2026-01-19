@@ -5,26 +5,17 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 
-class EntityType(str, Enum):
-    """Entity type enumeration"""
-    PERSON = "PERSON"
-    ORGANIZATION = "ORGANIZATION"
-    CONCEPT = "CONCEPT"
-    TECHNOLOGY = "TECHNOLOGY"
-    EVENT = "EVENT"
-    LOCATION = "LOCATION"
-    PRODUCT = "PRODUCT"
-    OTHER = "OTHER"
-
-
 class Entity(BaseModel):
     """Entity model"""
-    name: str = Field(..., description="Entity name")
-    type: EntityType = Field(..., description="Entity type")
-    description: Optional[str] = Field(None, description="Entity description in context")
+    name: str = Field(..., description="Canonical name of the entity")
+    description: Optional[str] = Field(None, description="Detailed description of the entity")
     
     class Config:
         use_enum_values = True
+    
+    def __hash__(self):
+        """Make entity hashable for set operations"""
+        return hash(self.name)
 
 
 class Hyperedge(BaseModel):
@@ -32,6 +23,8 @@ class Hyperedge(BaseModel):
     entity_names: List[str] = Field(..., description="List of entity names connected by this hyperedge")
     content: str = Field(..., description="Knowledge content shared by these entities")
     hyperedge_id: Optional[str] = Field(None, description="Unique hyperedge identifier")
+    chunk_id: Optional[str] = Field(None, description="Source chunk identifier")
+    chunks: Optional[List["Chunk"]] = Field(None, description="Chunks associated with this hyperedge (populated during query)")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
     
     class Config:
@@ -79,32 +72,10 @@ class Chunk(BaseModel):
         extra = "allow"
 
 
-class ChunkSearchResult(BaseModel):
-    """Chunk search result model"""
-    chunk_id: str = Field(..., description="Chunk identifier")
-    content: str = Field(..., description="Chunk content")
-    score: float = Field(..., description="Similarity score")
-    entities: List[str] = Field(default_factory=list, description="Entities mentioned in this chunk")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Chunk metadata")
-
-
-class HyperedgeInfo(BaseModel):
-    """Hyperedge information model"""
-    hyperedge_id: str = Field(..., description="Hyperedge identifier")
-    entities: List[str] = Field(..., description="Entities connected by this hyperedge")
-    content: str = Field(..., description="Knowledge content")
-
-
 class QueryResult(BaseModel):
     """Query search result model"""
     query: str = Field(..., description="Original query text")
-    top_chunks: List[ChunkSearchResult] = Field(default_factory=list, description="Top matching chunks")
-    hyperedges: List[HyperedgeInfo] = Field(default_factory=list, description="Related hyperedges")
-    expanded_chunks: List[Dict[str, Any]] = Field(default_factory=list, description="Expanded chunks from graph")
-    total_chunks_found: int = Field(0, description="Total number of chunks found")
-    total_hyperedges_found: int = Field(0, description="Total number of hyperedges found")
-    total_expanded_chunks: int = Field(0, description="Total number of expanded chunks")
-    entities_found: List[str] = Field(default_factory=list, description="All entities found in results")
+    hyperedges: List[Hyperedge] = Field(default_factory=list, description="Related hyperedges")
 
 
 class GraphExtractionResult(BaseModel):

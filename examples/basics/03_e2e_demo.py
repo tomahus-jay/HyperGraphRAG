@@ -59,34 +59,24 @@ async def main():
     query = "What is the relationship between Argos Corp's Chimera project and the Kravonia government, and what controversy is involved?"
     
     print("\n🔍 Searching...")
-    results = await rag.query_local(
+    results = await rag.query(
         query_text=query,
-        top_n=10,
-        max_hops=2
+        top_n=10
     )
     
     # Print results
     print(f"\n📊 Search Results:")
     print(f"- Query: {results.query}")
-    print(f"- Chunks found: {results.total_chunks_found}")
-    print(f"- Hyperedges found: {results.total_hyperedges_found}")
-    print(f"- Expanded chunks: {results.total_expanded_chunks}")
-    print(f"- Entities found: {len(results.entities_found)}")
-    
-    print("\n🔝 Top Chunks:")
-    for i, chunk in enumerate(results.top_chunks[:3], 1):
-        print(f"\n{i}. Chunk ID: {chunk.chunk_id}")
-        print(f"   Similarity Score: {chunk.score:.4f}")
-        print(f"   Content: {chunk.content}")
-        print(f"   Entities: {', '.join(chunk.entities) if chunk.entities else 'None'}")
-        print(f"   Metadata: {chunk.metadata}")
+    print(f"- Hyperedges found: {len(results.hyperedges)}")
     
     if results.hyperedges:
         print(f"\n🔗 Hyperedge Information:")
-        for i, hyperedge in enumerate(results.hyperedges[:2], 1):
+        for i, hyperedge in enumerate(results.hyperedges[:5], 1):
             print(f"\n{i}. Hyperedge ID: {hyperedge.hyperedge_id}")
             print(f"   Content: {hyperedge.content}")
-            print(f"   Entities: {', '.join(hyperedge.entities)}")
+            print(f"   Entities: {', '.join(hyperedge.entity_names)}")
+            if hyperedge.chunks:
+                print(f"      Source Chunk ID: {hyperedge.chunk_id}")
     
     # Clean up resources
     rag.close()
