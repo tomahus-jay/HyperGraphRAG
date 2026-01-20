@@ -10,7 +10,7 @@ from .neo4j_manager import Neo4jManager
 from .embedding import EmbeddingGenerator
 from .text_processor import TextProcessor
 from .llm_extractor import LLMExtractor
-from .models import QueryResult, Hyperedge, IngestionConfig
+from .models import QueryResult, Hyperedge
 from .logger import setup_logger
 
 logger = setup_logger("hypergraphrag.client")
@@ -134,7 +134,7 @@ class HyperGraphRAG:
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
-        config: Optional[IngestionConfig] = None,
+        batch_id: Optional[str] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS,
         show_progress: bool = True
@@ -143,15 +143,15 @@ class HyperGraphRAG:
         Insert document data and create hypergraph structure with async batch processing.
         Returns the batch_id.
         """
-        if config is None:
-            config = IngestionConfig(batch_id=str(uuid.uuid4()), tags=[])
+        if batch_id is None:
+            batch_id = str(uuid.uuid4())
             
-        logger.info(f"Started ingestion for batch: {config.batch_id}")
+        logger.info(f"Started ingestion for batch: {batch_id}")
         
         stream = self.add_stream(
             documents, 
             metadata, 
-            config,
+            batch_id,
             batch_size, 
             max_concurrent_tasks
         )
@@ -169,7 +169,7 @@ class HyperGraphRAG:
                 if show_progress and tqdm:
                     total_chunks = update['total_chunks']
                     total_batches = math.ceil(total_chunks / batch_size)
-                    pbar = tqdm(total=total_batches, desc=f"Batch {config.batch_id[:8]}", unit="batch")
+                    pbar = tqdm(total=total_batches, desc=f"Batch {batch_id[:8]}", unit="batch")
                 
             elif status == "processing":
                 total_batches = update["total_batches"]
@@ -177,7 +177,7 @@ class HyperGraphRAG:
                 
                 # Initialize pbar if not exists (fallback)
                 if pbar is None and show_progress and tqdm:
-                    pbar = tqdm(total=total_batches, desc=f"Batch {config.batch_id[:8]}", unit="batch")
+                    pbar = tqdm(total=total_batches, desc=f"Batch {batch_id[:8]}", unit="batch")
                 
                 if pbar:
                     pbar.update(1)
@@ -200,39 +200,31 @@ class HyperGraphRAG:
                     
                 stats = update["total_stats"]
                 logger.info(
-                    f"Batch {config.batch_id} complete. Created {stats['chunks']} chunks, "
+                    f"Batch {batch_id} complete. Created {stats['chunks']} chunks, "
                     f"{stats['entities']} entities, and {stats['hyperedges']} hyperedges."
                 )
         
         if pbar:
             pbar.close()
             
-        return config.batch_id
-
-    def delete(self, batch_id: str):
-        """
-        Delete a batch and all its associated data (Rollback).
-        """
-        logger.info(f"Deleting batch {batch_id}...")
-        self.neo4j.delete_batch(batch_id)
-        logger.info(f"Batch {batch_id} deleted.")
+        return batch_id
 
     async def add_stream(
         self,
         documents: List[str],
         metadata: Optional[List[Dict[str, Any]]] = None,
-        config: Optional[IngestionConfig] = None,
+        batch_id: Optional[str] = None,
         batch_size: int = 10,
         max_concurrent_tasks: int = DEFAULT_MAX_CONCURRENT_TASKS
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Insert document data and yield progress updates using an iterator pattern.
         """
-        if config is None:
-            config = IngestionConfig(batch_id=str(uuid.uuid4()), tags=[])
+        if batch_id is None:
+            batch_id = str(uuid.uuid4())
         
         # Ensure batch node exists (Create/Merge)
-        self.neo4j.create_batch_node(config.batch_id, config.tags)
+        self.neo4j.create_batch_node(batch_id)
             
         all_chunks = self._chunk_documents(documents, metadata)
         yield {"status": "chunking_complete", "total_chunks": len(all_chunks)}
@@ -253,7 +245,7 @@ class HyperGraphRAG:
         
         tasks = [
             self._process_batch_with_semaphore(
-                i, batch, db_semaphore, task_semaphore, config.batch_id
+                i, batch, db_semaphore, task_semaphore, batch_id
             ) 
             for i, batch in enumerate(chunk_batches)
         ]
@@ -294,6 +286,14 @@ class HyperGraphRAG:
         """
         # max_hops is currently ignored in simplified local search
         return await self._local_search(query_text, top_n=top_n)
+
+    def delete(self, batch_id: str):
+        """
+        Delete a batch and all its associated data (Rollback).
+        """
+        logger.info(f"Deleting batch {batch_id}...")
+        self.neo4j.delete_batch(batch_id)
+        logger.info(f"Batch {batch_id} deleted.")
 
     def reset_database(self):
         """Reset Neo4j graph (including vectors)"""

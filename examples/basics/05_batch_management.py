@@ -1,28 +1,26 @@
 """Example: Batch Management (Isolation and Rollback)"""
 import asyncio
 from hypergraphrag import HyperGraphRAG
-from hypergraphrag.models import IngestionConfig
 
 async def main():
     rag = HyperGraphRAG(chunk_size=500, chunk_overlap=50)
-    rag.reset_database()
-    print("Database reset successfully.")
+
     # --- Scenario 1: Add Batch A (Tech Context) ---
     documents_a = ["Apple released the new iPhone with advanced AI features."]
-    config_a = IngestionConfig(batch_id="batch_tech_01", tags=["tech", "apple"])
+    batch_id_a = "batch_tech_01"
     
     print(f"\n1️⃣ Adding Batch A (Tech): '{documents_a[0]}'")
-    await rag.add(documents=documents_a, config=config_a)
-    print(f"   ✅ Batch A ({config_a.batch_id}) added.")
+    await rag.add(documents=documents_a, batch_id=batch_id_a)
+    print(f"   ✅ Batch A ({batch_id_a}) added.")
 
     # --- Scenario 2: Add Batch B (Fruit Context) ---
     # Strategy 1 (Isolation) allows 'Apple' to exist as separate entities in different batches
     documents_b = ["Apple is a sweet and crunchy fruit rich in fiber."]
-    config_b = IngestionConfig(batch_id="batch_fruit_01", tags=["food", "apple"])
+    batch_id_b = "batch_fruit_01"
     
     print(f"\n2️⃣ Adding Batch B (Fruit): '{documents_b[0]}'")
-    await rag.add(documents=documents_b, config=config_b)
-    print(f"   ✅ Batch B ({config_b.batch_id}) added.")
+    await rag.add(documents=documents_b, batch_id=batch_id_b)
+    print(f"   ✅ Batch B ({batch_id_b}) added.")
     print("   ℹ️  Note: 'Apple' entity in Batch A and Batch B are completely isolated.")
 
     # --- Scenario 3: Delete Batch A (Rollback) ---

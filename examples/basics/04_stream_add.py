@@ -1,7 +1,8 @@
 """Example: Stream Add documents into Hypergraph RAG with Text Logging"""
 import asyncio
+
+from torch import batch_norm
 from hypergraphrag import HyperGraphRAG
-from hypergraphrag.models import IngestionConfig
 
 async def main():
     # Initialize client
@@ -51,20 +52,15 @@ async def main():
         {"source": "graph_db", "category": "intermediate", "topic": "Database"}
     ]
     
-    # Configure Batch
-    config = IngestionConfig(
-        batch_id="stream_batch_01",
-        tags=["stream", "logging"]
-    )
-    
-    print(f"🚀 Starting Stream Add (Batch: {config.batch_id})...")
+    batch_id = "stream_batch_01"
+    print(f"🚀 Starting Stream Add (Batch: {batch_id})...")
     
     # Add data using stream method with manual logging
     # Using batch_size=1 to see granular updates for this small dataset
     async for update in rag.add_stream(
         documents=documents,
         metadata=metadata,
-        config=config,
+        batch_id=batch_id,
         batch_size=1,
         max_concurrent_tasks=5
     ):

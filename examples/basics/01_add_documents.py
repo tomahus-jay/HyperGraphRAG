@@ -1,7 +1,6 @@
 """Example: Add documents into Hypergraph RAG"""
 import asyncio
 from hypergraphrag import HyperGraphRAG
-from hypergraphrag.models import IngestionConfig
 
 async def main():
     # Initialize client
@@ -42,14 +41,10 @@ async def main():
         """
     ]
     
-    # Configure Batch
-    config = IngestionConfig(
-        batch_id="example_batch_01",
-        tags=["example", "basics"]
-    )
-    
+    batch_id="example_batch_01"
+
     # Add data with metadata
-    print(f"📝 Adding documents into Hypergraph RAG (Batch: {config.batch_id})...")
+    print(f"📝 Adding documents into Hypergraph RAG (Batch: {batch_id})...")
     batch_id = await rag.add(
         documents=documents,
         metadata=[
@@ -59,7 +54,7 @@ async def main():
             {"source": "vector_db", "category": "intermediate", "topic": "Database"},
             {"source": "graph_db", "category": "intermediate", "topic": "Database"}
         ],
-        config=config,
+        batch_id=batch_id,
         batch_size=1,
         max_concurrent_tasks=5
     )

@@ -1,6 +1,5 @@
 """Basic usage example for Hypergraph RAG"""
 from hypergraphrag import HyperGraphRAG
-from hypergraphrag.models import IngestionConfig
 
 # Initialize client
 rag = HyperGraphRAG(
@@ -44,14 +43,10 @@ async def main():
     # Reset database for clean test
     rag.reset_database()
     
-    # Configure Batch
-    config = IngestionConfig(
-        batch_id="demo_batch_e2e",
-        tags=["demo", "e2e"]
-    )
-    
+    batch_id="demo_batch_e2e"
+
     # Insert data
-    print(f"📝 Inserting documents (Batch: {config.batch_id})...")
+    print(f"📝 Inserting documents (Batch: {batch_id})...")
     await rag.add(
         documents=documents,
         metadata=[
@@ -59,7 +54,7 @@ async def main():
             {"source": "news_article", "category": "geopolitics"},
             {"source": "investigation_memo", "category": "financial_crime"}
         ],
-        config=config
+        batch_id=batch_id
     )
     
     # Query search using local search (entity-centric graph traversal)
