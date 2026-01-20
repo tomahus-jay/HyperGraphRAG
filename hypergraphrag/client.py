@@ -146,8 +146,6 @@ class HyperGraphRAG:
         if config is None:
             config = IngestionConfig(batch_id=str(uuid.uuid4()), tags=[])
             
-        # Create Batch Node
-        self.neo4j.create_batch_node(config.batch_id, config.tags)
         logger.info(f"Started ingestion for batch: {config.batch_id}")
         
         stream = self.add_stream(
@@ -232,8 +230,9 @@ class HyperGraphRAG:
         """
         if config is None:
             config = IngestionConfig(batch_id=str(uuid.uuid4()), tags=[])
-            # Ensure batch node exists if calling add_stream directly
-            self.neo4j.create_batch_node(config.batch_id, config.tags)
+        
+        # Ensure batch node exists (Create/Merge)
+        self.neo4j.create_batch_node(config.batch_id, config.tags)
             
         all_chunks = self._chunk_documents(documents, metadata)
         yield {"status": "chunking_complete", "total_chunks": len(all_chunks)}
