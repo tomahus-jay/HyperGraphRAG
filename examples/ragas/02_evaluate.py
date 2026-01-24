@@ -1,11 +1,10 @@
 import asyncio
 import os
 import warnings
-import json
 import pickle
 import pandas as pd
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 load_dotenv()
 
@@ -94,15 +93,33 @@ async def main():
 
     finally:
         rag.close()
-        
-    # 4. Run Ragas Evaluation
+
+    return ragas_data
+
+if __name__ == "__main__":
+    # 1. Collect Data (Async)
+    ragas_data = asyncio.run(main())
+    
+    if not ragas_data or not ragas_data["question"]:
+        print("❌ No data collected. Exiting.")
+        exit(0)
+
+    # 2. Run Ragas Evaluation (Sync context to avoid asyncio loop conflicts)
     print("\n🤖 Running Ragas Evaluation...")
     
+    # Load configuration again for Sync context
+    evaluator_llm = ChatOpenAI(
+        model=os.getenv("LLM_MODEL"),
+        api_key=os.getenv("LLM_API_KEY"),
+        base_url=os.getenv("LLM_BASE_URL")
+    )
+            
     # Create Dataset
-    df = pd.DataFrame(ragas_data)
-    # Join ground truths for Ragas compatibility
-    df["ground_truth"] = df["ground_truth"].apply(lambda x: "\n".join(x))
+    import pandas as pd
+    from datasets import Dataset
     
+    df = pd.DataFrame(ragas_data)
+    df["ground_truth"] = df["ground_truth"].apply(lambda x: "\n".join(x))
     ragas_dataset = Dataset.from_pandas(df)
     
     # Run evaluation
@@ -112,6 +129,7 @@ async def main():
             context_recall,
             context_precision,
         ],
+        llm=evaluator_llm
     )
     
     print("\n" + "="*50)
@@ -138,6 +156,3 @@ async def main():
     output_file = "ragas_evaluation_results.csv"
     res_df.to_csv(output_file, index=False)
     print(f"\n💾 Results saved to {output_file}")
-
-if __name__ == "__main__":
-    asyncio.run(main())

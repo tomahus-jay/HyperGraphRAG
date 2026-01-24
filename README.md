@@ -151,8 +151,8 @@ Evaluation performed on **HotpotQA** dataset (1000 samples) using Ragas metrics
 ![Evaluation Results](docs/images/evaluation_result.png)
 
 **Ragas Metrics:**
-- **Context Recall**: 0.7321
-- **Context Precision**: 0.5717
+- **Context Recall**: 0.4894
+- **Context Precision**: 0.6579
 
 ## Project Structure
 

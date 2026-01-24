@@ -417,7 +417,7 @@ class Neo4jManager:
         """
         with self.driver.session() as session:
             result = session.run("""
-                CALL db.index.fulltext.queryNodes("chunk_fulltext", $query, {limit: 50}) 
+                CALL db.index.fulltext.queryNodes("chunk_fulltext", $search_query, {limit: 50}) 
                 YIELD node as chunk, score
                 
                 MATCH (chunk)-[:FROM_DOCUMENT]->(d:Document)
@@ -427,7 +427,7 @@ class Neo4jManager:
                 LIMIT $k
                 
                 RETURN d.id as doc_id
-            """, query=query_text, k=top_k)
+            """, search_query=query_text, k=top_k)
             
             return [record["doc_id"] for record in result]
 
