@@ -389,9 +389,15 @@ class Neo4jManager:
             
         with self.driver.session() as session:
             result = session.run(f"""
-                CALL db.index.vector.queryNodes($index_name, $k, $query_vector)
+                CALL db.index.vector.queryNodes($index_name, toInteger($k * 5), $query_vector)
                 YIELD node, score
-                RETURN node, score
+                
+                WITH coalesce(node.chunk_id, node.id) AS dedup_key, 
+                     head(collect({{node: node, score: score}})) AS top_result
+                
+                RETURN top_result.node AS node, top_result.score AS score
+                ORDER BY score DESC
+                LIMIT $k
             """, index_name=index_name, k=top_k, query_vector=query_vector)
             
             results = []
@@ -414,22 +420,33 @@ class Neo4jManager:
     def get_top_documents_by_bm25(self, query_text: str, top_k: int = 3) -> List[str]:
         """
         BM25 search for Chunks to identify relevant Documents.
+        Handles query sanitization to prevent Lucene syntax errors.
         """
+        # Sanitize query: escape special characters that Lucene uses
+        # Basic sanitization: remove or escape common problematic chars
+        sanitized_query = query_text.replace("/", " ").replace(":", " ").replace("*", " ")
+        # Also could use more robust escaping if needed, but replacing with space is usually safe for search
+        
         with self.driver.session() as session:
-            result = session.run("""
-                CALL db.index.fulltext.queryNodes("chunk_fulltext", $search_query, {limit: 50}) 
-                YIELD node as chunk, score
+            try:
+                result = session.run("""
+                    CALL db.index.fulltext.queryNodes("chunk_fulltext", $search_query, {limit: 50}) 
+                    YIELD node as chunk, score
+                    
+                    MATCH (chunk)-[:FROM_DOCUMENT]->(d:Document)
+                    
+                    WITH d, sum(score) as doc_score
+                    ORDER BY doc_score DESC
+                    LIMIT $k
+                    
+                    RETURN d.id as doc_id
+                """, search_query=sanitized_query, k=top_k)
                 
-                MATCH (chunk)-[:FROM_DOCUMENT]->(d:Document)
-                
-                WITH d, sum(score) as doc_score
-                ORDER BY doc_score DESC
-                LIMIT $k
-                
-                RETURN d.id as doc_id
-            """, search_query=query_text, k=top_k)
-            
-            return [record["doc_id"] for record in result]
+                return [record["doc_id"] for record in result]
+            except Exception as e:
+                # Log error or re-raise depending on policy
+                # For now we return empty list to allow fallback to vector search
+                return []
 
     def search_vectors_with_document_bias(
         self, 

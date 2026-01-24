@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import warnings
 import pickle
 import pandas as pd
@@ -13,13 +14,14 @@ warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
 from ragas import evaluate
 from ragas.metrics import context_recall, context_precision
+from ragas.run_config import RunConfig
 from hypergraphrag import HyperGraphRAG
 from datasets import Dataset
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
-TOP_K = 5
+TOP_N = 10
 DATASET_PATH = "hotpot_qa_dataset.pkl"
 
 async def main():
@@ -71,19 +73,16 @@ async def main():
             # Retrieval
             result = await rag.query(
                 query_text=question,
-                top_n=TOP_K
+                top_n=TOP_N
             )
-            
-            # Extract chunks from hyperedges for Ragas
+
             retrieved_chunks = []
             for he in result.hyperedges:
                 if he.chunk:
                     retrieved_chunks.append(he.chunk.content)
-                # Removed fallback to he.content to ensure we only evaluate real retrieved chunks
             
             # Take top K unique contents
-            retrieved_contexts = list(dict.fromkeys(retrieved_chunks))[:TOP_K]
-            
+            retrieved_contexts = list(dict.fromkeys(retrieved_chunks))
             ragas_data["question"].append(question)
             ragas_data["contexts"].append(retrieved_contexts)
             ragas_data["ground_truth"].append(ground_truth_sentences)
@@ -129,7 +128,10 @@ if __name__ == "__main__":
             context_recall,
             context_precision,
         ],
-        llm=evaluator_llm
+        llm=evaluator_llm,
+        run_config=RunConfig(
+            timeout=600
+        )
     )
     
     print("\n" + "="*50)

@@ -269,8 +269,36 @@ class HyperGraphRAG:
         query_text: str,
         top_n: int = 10
     ) -> QueryResult:
-        """Main query interface for Hypergraph RAG."""
-        return await self._local_search(query_text, top_n=top_n)
+        """
+        Main query interface for Hypergraph RAG.
+        Combines Local Search (Entity-centric) and Global Search (Direct Hyperedge).
+        """
+        local_n = top_n // 2
+        global_n = top_n - local_n
+        
+        local_task = self._local_search(query_text, top_n=local_n)
+        global_task = self._global_search(query_text, top_n=global_n)
+        
+        results = await asyncio.gather(local_task, global_task)
+        local_result, global_result = results
+        
+        final_hyperedges = []
+        seen_ids = set()
+        
+        for he in local_result.hyperedges:
+            if he.hyperedge_id not in seen_ids:
+                final_hyperedges.append(he)
+                seen_ids.add(he.hyperedge_id)
+        
+        for he in global_result.hyperedges:
+            if he.hyperedge_id not in seen_ids:
+                final_hyperedges.append(he)
+                seen_ids.add(he.hyperedge_id)
+        
+        return QueryResult(
+            query=query_text,
+            hyperedges=final_hyperedges
+        )
 
     def delete(self, doc_id: str):
         """Delete a document and all its associated data (Rollback)."""
@@ -359,12 +387,17 @@ class HyperGraphRAG:
         # Step 1: Hybrid Entity Search (Global Vector + Document Bias)
         query_embedding = self.embedding.generate_embedding(query_text)
         
-        global_k = int(top_n * 0.7)
-        local_k = top_n - global_k
+        # Search for enough entities to likely yield results
+        # We use a fixed reasonable number instead of multiplier logic
+        # 10-20 entities is a good baseline for finding connected hyperedges
+        k_entities = max(top_n * 2, 10)
+        
+        global_k = int(k_entities * 0.7)
+        local_k = k_entities - global_k
         
         # Ensure minimum counts
-        if global_k < 3: global_k = top_n
-        if top_docs and local_k < 2: local_k = 2
+        if global_k < 3: global_k = 3
+        if top_docs and local_k < 3: local_k = 3
 
         top_entities = await self._search_initial_entities_hybrid(
             query_embedding, 
@@ -375,9 +408,32 @@ class HyperGraphRAG:
         
         entities_found = [e["name"] for e in top_entities]
         
-        # Step 2: Get BEST hyperedge for each entity
-        top_hyperedges = await self._find_best_hyperedges(entities_found, query_embedding, top_n)
-        logger.debug(f"Found {len(top_hyperedges)} unique best hyperedges")
+        # Step 2: Get BEST hyperedges for each entity
+        # [Modified] Over-fetch to ensure diversity after dedup
+        top_hyperedges_candidates = await self._find_best_hyperedges(
+            entities_found, 
+            query_embedding, 
+            top_n=top_n * 3,     # Over-fetching
+            limit_per_entity=10  # Increased limit
+        )
+        
+        # Deduplicate by Chunk ID
+        unique_hyperedges = []
+        seen_chunk_ids = set()
+        
+        for he in top_hyperedges_candidates:
+            # Fallback to hyperedge_id if chunk_id is missing
+            dedup_key = he.get("chunk_id") or he["hyperedge_id"]
+            
+            if dedup_key not in seen_chunk_ids:
+                seen_chunk_ids.add(dedup_key)
+                unique_hyperedges.append(he)
+            
+            if len(unique_hyperedges) >= top_n:
+                break
+                
+        top_hyperedges = unique_hyperedges
+        logger.debug(f"Found {len(top_hyperedges)} unique best hyperedges (after chunk dedup)")
 
         # Step 3: Fetch chunks for these hyperedges (for content/metadata)
         chunks_map = await self._fetch_hyperedge_chunks(top_hyperedges)
@@ -385,6 +441,57 @@ class HyperGraphRAG:
         # Step 4: Construct Hyperedge objects
         final_hyperedges = self._construct_query_result(top_hyperedges, chunks_map)
             
+        return QueryResult(
+            query=query_text,
+            hyperedges=final_hyperedges
+        )
+
+    async def _global_search(
+        self,
+        query_text: str,
+        top_n: int = 10
+    ) -> QueryResult:
+        """
+        Global search: Direct vector search on Hyperedge nodes.
+        Finds hyperedges semantically similar to the query, regardless of entities.
+        """
+        logger.debug(f"Starting global search with top_n={top_n}")
+        query_embedding = self.embedding.generate_embedding(query_text)
+        
+        results = await asyncio.to_thread(
+            self.neo4j.search_vectors,
+            query_vector=query_embedding,
+            top_k=top_n,
+            target_node="Hyperedge" # Search Hyperedge nodes directly
+        )
+        
+        top_hyperedges = []
+        for res in results:
+            
+            hyperedge_id = res.get("id")
+            if not hyperedge_id: continue
+            
+            top_hyperedges.append({
+                "hyperedge_id": hyperedge_id,
+                "content": res.get("content"),
+                "chunk_id": res.get("chunk_id"),
+                "metadata": res.get("metadata"),
+                "score": res.get("score"),
+            })
+
+        chunks_map = await self._fetch_hyperedge_chunks(top_hyperedges)
+
+        async def fetch_entities(he_id):
+            return await asyncio.to_thread(self.neo4j.get_entities_by_hyperedge, he_id)
+
+        entity_tasks = [fetch_entities(he["hyperedge_id"]) for he in top_hyperedges]
+        entity_results = await asyncio.gather(*entity_tasks)
+
+        for i, he in enumerate(top_hyperedges):
+            he["entity_names"] = [e["name"] for e in entity_results[i]]
+
+        final_hyperedges = self._construct_query_result(top_hyperedges, chunks_map)
+        
         return QueryResult(
             query=query_text,
             hyperedges=final_hyperedges
@@ -646,9 +753,10 @@ class HyperGraphRAG:
         self, 
         entity_names: List[str], 
         query_embedding: List[float],
-        top_n: int
+        top_n: int,
+        limit_per_entity: int = 1
     ) -> List[Dict[str, Any]]:
-        """Find best hyperedge for each entity"""
+        """Find best hyperedges for each entity"""
         
         async def get_best_hyperedge(entity_name):
             async with self.query_semaphore:
@@ -656,7 +764,7 @@ class HyperGraphRAG:
                     self.neo4j.get_best_hyperedges_with_entities, 
                     entity_name,
                     query_embedding,
-                    limit=1
+                    limit=limit_per_entity
                 )
         
         tasks = [get_best_hyperedge(name) for name in entity_names]
